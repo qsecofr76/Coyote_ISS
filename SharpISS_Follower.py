@@ -52,6 +52,21 @@ class SharpISSFollowerForm(Form):
         self.last_traj_idx = 0
         self.active_thread = None
         
+        # Pointing model / Calibration variables
+        self.calib_delta_ra_x = 0.0
+        self.calib_delta_dec_x = 0.0
+        self.calib_delta_az_x = 0.0
+        self.calib_delta_alt_x = 0.0
+        self.calib_delta_ra_y = 0.0
+        self.calib_delta_dec_y = 0.0
+        self.calib_delta_az_y = 0.0
+        self.calib_delta_alt_y = 0.0
+        self.calib_delta_ra_z = 0.0
+        self.calib_delta_dec_z = 0.0
+        self.calib_delta_az_z = 0.0
+        self.calib_delta_alt_z = 0.0
+        self.calib_active = False
+        
         # Real-time state monitored by background thread
         self.status_text = "Nessuna traiettoria caricata"
         self.countdown_text = "Tempo all'Intercettazione: --"
@@ -60,6 +75,13 @@ class SharpISSFollowerForm(Form):
         
         self.create_widgets()
         self.update_gui_labels()
+        
+        # Keyboard Shortcuts for Real-Time Exposure/Gain control
+        self.KeyPreview = True
+        self.KeyDown += self.on_key_down
+        
+        self.last_applied_exp = None
+        self.last_applied_gain = None
         
         # Start GUI status updater timer
         self.timer = Threading.Timer(self.timer_tick, None, 100, 100)
@@ -155,9 +177,9 @@ class SharpISSFollowerForm(Form):
         self.Controls.Add(lbl_slew)
         
         self.btn_goto_solve = Button()
-        self.btn_goto_solve.Text = "GOTO & Plate Solve (Consigliato)"
+        self.btn_goto_solve.Text = "GOTO + Solve Inizio"
         self.btn_goto_solve.Location = Point(15, 255)
-        self.btn_goto_solve.Size = Size(235, 30)
+        self.btn_goto_solve.Size = Size(145, 30)
         self.btn_goto_solve.BackColor = Color.FromArgb(58, 58, 60)
         self.btn_goto_solve.ForeColor = Color.White
         self.btn_goto_solve.FlatStyle = 0
@@ -165,14 +187,24 @@ class SharpISSFollowerForm(Form):
         self.Controls.Add(self.btn_goto_solve)
         
         self.btn_goto_only = Button()
-        self.btn_goto_only.Text = "GOTO Semplice (Senza Solve)"
-        self.btn_goto_only.Location = Point(260, 255)
-        self.btn_goto_only.Size = Size(230, 30)
+        self.btn_goto_only.Text = "GOTO Semplice"
+        self.btn_goto_only.Location = Point(170, 255)
+        self.btn_goto_only.Size = Size(130, 30)
         self.btn_goto_only.BackColor = Color.FromArgb(58, 58, 60)
         self.btn_goto_only.ForeColor = Color.White
         self.btn_goto_only.FlatStyle = 0
         self.btn_goto_only.Click += self.on_goto_only
         self.Controls.Add(self.btn_goto_only)
+
+        self.btn_calib_3pt = Button()
+        self.btn_calib_3pt.Text = "Calibrazione 3 Punti"
+        self.btn_calib_3pt.Location = Point(310, 255)
+        self.btn_calib_3pt.Size = Size(180, 30)
+        self.btn_calib_3pt.BackColor = Color.FromArgb(58, 58, 60)
+        self.btn_calib_3pt.ForeColor = Color.White
+        self.btn_calib_3pt.FlatStyle = 0
+        self.btn_calib_3pt.Click += self.on_calib_3pt
+        self.Controls.Add(self.btn_calib_3pt)
         
         # Settings Panel
         lbl_set = Label()
@@ -371,6 +403,7 @@ class SharpISSFollowerForm(Form):
             self.btn_connect.Enabled = False
             self.btn_goto_solve.Enabled = False
             self.btn_goto_only.Enabled = False
+            self.btn_calib_3pt.Enabled = False
             self.btn_arm.Enabled = False
             self.btn_sim.Enabled = False
         else:
@@ -379,6 +412,7 @@ class SharpISSFollowerForm(Form):
             has_data = len(self.trajectory_data) > 0
             self.btn_goto_solve.Enabled = has_data
             self.btn_goto_only.Enabled = has_data
+            self.btn_calib_3pt.Enabled = has_data
             self.btn_arm.Enabled = has_data
             self.btn_sim.Enabled = has_data
 
@@ -438,7 +472,7 @@ class SharpISSFollowerForm(Form):
                 )
 
     # --- CAMERA CONFIG CORE ---
-    def configure_camera(self, exp_ms, gain):
+    def configure_camera(self, exp_ms, gain, force_raw8=False):
         if SharpCap is None or SharpCap.SelectedCamera is None:
             print("Configure camera skipped (SharpCap not running or no camera selected)")
             return True
@@ -450,7 +484,6 @@ class SharpISSFollowerForm(Form):
             if exp_ctrl is not None:
                 exp_ctrl.Value = float(exp_ms)
             else:
-                # Search list
                 for ctrl in cam.Controls:
                     if ctrl.Name.lower() == "exposure":
                         ctrl.Value = float(exp_ms)
@@ -465,6 +498,33 @@ class SharpISSFollowerForm(Form):
                     if ctrl.Name.lower() == "gain":
                         ctrl.Value = float(gain)
                         break
+
+            # Force 8-bit RAW and Max Resolution (disable binning) if requested
+            if force_raw8:
+                # 1. Output Format / Colour Space
+                for ctrl in cam.Controls:
+                    name_lower = ctrl.Name.lower()
+                    if "colour space" in name_lower or "colourspace" in name_lower or "output format" in name_lower:
+                        try:
+                            allowed = list(ctrl.AvailableValues)
+                            for val in ["RAW8", "Mono8", "RGB8"]:
+                                if val in allowed:
+                                    ctrl.Value = val
+                                    break
+                        except Exception:
+                            pass
+                
+                # 2. Reset Binning to 1
+                for ctrl in cam.Controls:
+                    if ctrl.Name.lower() == "binning":
+                        try:
+                            allowed = list(ctrl.AvailableValues)
+                            if "1" in allowed:
+                                ctrl.Value = "1"
+                            elif 1 in allowed:
+                                ctrl.Value = 1
+                        except Exception:
+                            pass
             return True
         except Exception as e:
             print("Error configuring camera controls:", e)
@@ -510,6 +570,234 @@ class SharpISSFollowerForm(Form):
                     "Errore caricamento traiettoria:\n" + str(e),
                     "Errore File", MessageBoxButtons.OK, MessageBoxIcon.Error
                 )
+
+    # --- 3-POINT CALIBRATION ---
+    def on_calib_3pt(self, sender, event):
+        if not self.trajectory_data:
+            return
+        self.abort_requested = False
+        Threading.ThreadPool.QueueUserWorkItem(self.run_calib_3pt_thread, None)
+
+    def run_calib_3pt_thread(self, state):
+        if SharpCap is None or SharpCap.Mounts.SelectedMount is None:
+            self.status_text = "Errore: Montatura disconnessa"
+            return
+            
+        mount = SharpCap.Mounts.SelectedMount
+        ascom = mount.AscomMount
+        
+        try:
+            self.tracking_active = True
+            self.set_state("Inizializzazione calibrazione...")
+            
+            # Helper function for coordinate differences with wrap-around
+            def diff_hours(h1, h2):
+                diff = h1 - h2
+                while diff > 12.0: diff -= 24.0
+                while diff < -12.0: diff += 24.0
+                return diff
+                
+            def diff_degrees(d1, d2):
+                diff = d1 - d2
+                while diff > 180.0: diff -= 360.0
+                while diff < -180.0: diff += 360.0
+                return diff
+
+            # Clear previous calibration values
+            self.calib_delta_ra_x = 0.0
+            self.calib_delta_dec_x = 0.0
+            self.calib_delta_az_x = 0.0
+            self.calib_delta_alt_x = 0.0
+            self.calib_delta_ra_y = 0.0
+            self.calib_delta_dec_y = 0.0
+            self.calib_delta_az_y = 0.0
+            self.calib_delta_alt_y = 0.0
+            self.calib_delta_ra_z = 0.0
+            self.calib_delta_dec_z = 0.0
+            self.calib_delta_az_z = 0.0
+            self.calib_delta_alt_z = 0.0
+            self.calib_active = False
+            
+            trajectory = self.trajectory_data["TRAJECTORY"]
+            
+            # Point X: Intercept point
+            ra_x = self.trajectory_data["INTERCEPT_RA"]
+            dec_x = self.trajectory_data["INTERCEPT_DEC"]
+            
+            # Point Y: Culmination point (maximum altitude point in trajectory)
+            max_alt_idx = 0
+            max_alt_val = -90.0
+            for idx, pt in enumerate(trajectory):
+                if pt[3] > max_alt_val:
+                    max_alt_val = pt[3]
+                    max_alt_idx = idx
+            ra_y = trajectory[max_alt_idx][1]
+            dec_y = trajectory[max_alt_idx][2]
+            
+            # Point Z: Descent set point (last point in trajectory)
+            ra_z = trajectory[-1][1]
+            dec_z = trajectory[-1][2]
+            
+            points = [
+                ("Inizio (X)", ra_x, dec_x),
+                ("Culmine (Y)", ra_y, dec_y),
+                ("Fine (Z)", ra_z, dec_z)
+            ]
+            
+            shifts = []
+            
+            star_exp = float(self.txt_star_exp.Text)
+            star_gain = float(self.txt_star_gain.Text)
+            
+            for name, ra_pt, dec_pt in points:
+                if self.abort_requested:
+                    self.set_state("Calibrazione Abortita")
+                    self.tracking_active = False
+                    return
+                    
+                self.set_state("Slew al punto %s..." % name)
+                ascom.SlewToCoordinatesAsync(ra_pt, dec_pt)
+                
+                # Wait for Slew
+                while ascom.Slewing:
+                    Threading.Thread.Sleep(200)
+                    if self.abort_requested:
+                        ascom.AbortSlew()
+                        self.set_state("Calibrazione Abortita")
+                        self.tracking_active = False
+                        return
+                
+                # Settle camera and apply star exposure
+                self.configure_camera(star_exp, star_gain)
+                Threading.Thread.Sleep(2000)
+                
+                if self.abort_requested:
+                    self.tracking_active = False
+                    return
+                
+                # Read coordinates before solve
+                ra_before = ascom.RightAscension
+                dec_before = ascom.Declination
+                az_before = ascom.Azimuth
+                alt_before = ascom.Altitude
+                
+                self.set_state("Solving al punto %s..." % name)
+                try:
+                    SharpCap.Transforms.PlateSolveAndSync()
+                    # Wait 12 seconds for solving
+                    for s in range(12, 0, -1):
+                        self.set_state("Solving %s... Attendi %ds" % (name, s))
+                        Threading.Thread.Sleep(1000)
+                        if self.abort_requested:
+                            self.tracking_active = False
+                            return
+                    
+                    # Read coordinates after solve
+                    ra_after = ascom.RightAscension
+                    dec_after = ascom.Declination
+                    az_after = ascom.Azimuth
+                    alt_after = ascom.Altitude
+                    
+                    # Calculate local shift
+                    shift_ra = diff_hours(ra_after, ra_before)
+                    shift_dec = diff_degrees(dec_after, dec_before)
+                    shift_az = diff_degrees(az_after, az_before)
+                    shift_alt = alt_after - alt_before
+                    
+                    shifts.append((shift_ra, shift_dec, shift_az, shift_alt, True))
+                    print("Solve %s OK: RA Offset=%f, Dec Offset=%f" % (name, shift_ra, shift_dec))
+                except Exception as ex:
+                    # Solve failed
+                    shifts.append((0.0, 0.0, 0.0, 0.0, False))
+                    print("Solve %s Fallito: %s" % (name, str(ex)))
+            
+            # Assign cumulative deltas based on which points solved
+            # X Point
+            if shifts[0][4]: # Solve X OK
+                self.calib_delta_ra_x = shifts[0][0]
+                self.calib_delta_dec_x = shifts[0][1]
+                self.calib_delta_az_x = shifts[0][2]
+                self.calib_delta_alt_x = shifts[0][3]
+            
+            # Y Point (cumulative)
+            if shifts[1][4]: # Solve Y OK
+                self.calib_delta_ra_y = self.calib_delta_ra_x + shifts[1][0]
+                self.calib_delta_dec_y = self.calib_delta_dec_x + shifts[1][1]
+                self.calib_delta_az_y = self.calib_delta_az_x + shifts[1][2]
+                self.calib_delta_alt_y = self.calib_delta_alt_x + shifts[1][3]
+            else:
+                self.calib_delta_ra_y = self.calib_delta_ra_x
+                self.calib_delta_dec_y = self.calib_delta_dec_x
+                self.calib_delta_az_y = self.calib_delta_az_x
+                self.calib_delta_alt_y = self.calib_delta_alt_x
+                
+            # Z Point (cumulative)
+            if shifts[2][4]: # Solve Z OK
+                self.calib_delta_ra_z = self.calib_delta_ra_y + shifts[2][0]
+                self.calib_delta_dec_z = self.calib_delta_dec_y + shifts[2][1]
+                self.calib_delta_az_z = self.calib_delta_az_x + shifts[2][2] # wait, using cumulative pattern:
+                self.calib_delta_alt_z = self.calib_delta_alt_y + shifts[2][3]
+            else:
+                self.calib_delta_ra_z = self.calib_delta_ra_y
+                self.calib_delta_dec_z = self.calib_delta_dec_y
+                self.calib_delta_az_z = self.calib_delta_az_y
+                self.calib_delta_alt_z = self.calib_delta_alt_y
+            
+            # Z Az is cumulative:
+            if shifts[2][4]:
+                self.calib_delta_az_z = self.calib_delta_az_y + shifts[2][2]
+            
+            self.calib_active = True
+            solved_count = sum(1 for s in shifts if s[4])
+            self.set_state("Calibrazione terminata (%d/3 risolti)" % solved_count)
+            MessageBox.Show(
+                "Calibrazione a 3 punti completata!\n\nPunti risolti con successo: %d su 3.\n"
+                "I delta misurati verranno applicati in tempo reale durante l'inseguimento." % solved_count,
+                "Calibrazione Terminata", MessageBoxButtons.OK, MessageBoxIcon.Information
+            )
+        except Exception as e:
+            self.set_state("Errore Calibrazione: " + str(e))
+        finally:
+            self.tracking_active = False
+
+    def get_interpolated_correction(self, t_current):
+        t_x = self.trajectory_data["INTERCEPT_TIME"]
+        trajectory = self.trajectory_data["TRAJECTORY"]
+        t_z = trajectory[-1][0]
+        
+        # Find Y point timestamp (culmination)
+        max_alt_idx = 0
+        max_alt_val = -90.0
+        for idx, pt in enumerate(trajectory):
+            if pt[3] > max_alt_val:
+                max_alt_val = pt[3]
+                max_alt_idx = idx
+        t_y = trajectory[max_alt_idx][0]
+        
+        # Select active parameters based on mode
+        if self.is_altaz:
+            x_val = (self.calib_delta_az_x, self.calib_delta_alt_x)
+            y_val = (self.calib_delta_az_y, self.calib_delta_alt_y)
+            z_val = (self.calib_delta_az_z, self.calib_delta_alt_z)
+        else:
+            x_val = (self.calib_delta_ra_x, self.calib_delta_dec_x)
+            y_val = (self.calib_delta_ra_y, self.calib_delta_dec_y)
+            z_val = (self.calib_delta_ra_z, self.calib_delta_dec_z)
+            
+        if t_current <= t_x:
+            return x_val[0], x_val[1]
+        elif t_current >= t_z:
+            return z_val[0], z_val[1]
+        elif t_current < t_y:
+            w = (t_current - t_x) / (t_y - t_x)
+            d0 = (1.0 - w) * x_val[0] + w * y_val[0]
+            d1 = (1.0 - w) * x_val[1] + w * y_val[1]
+            return d0, d1
+        else:
+            w = (t_current - t_y) / (t_z - t_y)
+            d0 = (1.0 - w) * y_val[0] + w * z_val[0]
+            d1 = (1.0 - w) * y_val[1] + w * z_val[1]
+            return d0, d1
 
     # --- SLEW & CALIBRATE (GOTO) ROUTINES ---
     def on_goto_solve(self, sender, event):
@@ -587,10 +875,12 @@ class SharpISSFollowerForm(Form):
             else:
                 self.set_state("Puntato. Impostazione camera per ISS...")
                 
-            # Configure ISS camera settings
+            # Configure ISS camera settings (Force RAW8 and Binning=1 for maximum speed and resolution)
             iss_exp = float(self.txt_iss_exp.Text)
             iss_gain = float(self.txt_iss_gain.Text)
-            self.configure_camera(iss_exp, iss_gain)
+            self.configure_camera(iss_exp, iss_gain, force_raw8=True)
+            self.last_applied_exp = iss_exp
+            self.last_applied_gain = iss_gain
             
             # Ready for tracking
             self.set_state("Posizionato e Pronto per l'Inseguimento")
@@ -728,6 +1018,18 @@ class SharpISSFollowerForm(Form):
                     
                 t_now = get_simulated_time()
                 
+                # Dynamic Exposure/Gain updates in real-time if changed in GUI or via keyboard
+                try:
+                    current_exp = float(self.txt_iss_exp.Text)
+                    current_gain = float(self.txt_iss_gain.Text)
+                    if current_exp != self.last_applied_exp or current_gain != self.last_applied_gain:
+                        # Update camera on-the-fly, keeping RAW8 settings
+                        self.configure_camera(current_exp, current_gain, force_raw8=True)
+                        self.last_applied_exp = current_exp
+                        self.last_applied_gain = current_gain
+                except Exception as ex:
+                    pass
+                
                 # Check for camera trigger (1 second before intercept)
                 if t_now >= t_capture and not capture_started:
                     try:
@@ -758,6 +1060,16 @@ class SharpISSFollowerForm(Form):
                 
                 target_ra_deg = ra0 * 15.0 + frac * angle_diff(ra1 * 15.0, ra0 * 15.0)
                 target_ra = target_ra_deg / 15.0
+                
+                # Apply dynamic pointing calibration if active
+                if self.calib_active:
+                    d0, d1 = self.get_interpolated_correction(t_now)
+                    if self.is_altaz:
+                        target_az = target_az + d0 - self.calib_delta_az_z
+                        target_alt = target_alt + d1 - self.calib_delta_alt_z
+                    else:
+                        target_ra = target_ra + d0 - self.calib_delta_ra_z
+                        target_dec = target_dec + d1 - self.calib_delta_dec_z
                 
                 # Feedforward speeds (deg/s)
                 ff_ra_rate = ra_rate0 + frac * (ra_rate1 - ra_rate0)
@@ -843,6 +1155,33 @@ class SharpISSFollowerForm(Form):
             
         self.last_traj_idx = idx
         return trajectory[idx], trajectory[idx+1]
+
+    def on_key_down(self, sender, event):
+        if not self.tracking_active:
+            return
+            
+        from System.Windows.Forms import Keys
+        try:
+            # Up/Down Arrows: Adjust exposure by +/- 0.1 ms (min 0.1ms)
+            if event.KeyCode == Keys.Up:
+                val = float(self.txt_iss_exp.Text) + 0.1
+                self.txt_iss_exp.Text = "%.1f" % val
+                event.Handled = True
+            elif event.KeyCode == Keys.Down:
+                val = max(0.1, float(self.txt_iss_exp.Text) - 0.1)
+                self.txt_iss_exp.Text = "%.1f" % val
+                event.Handled = True
+            # Right/Left Arrows: Adjust gain by +/- 5 (min 0)
+            elif event.KeyCode == Keys.Right:
+                val = float(self.txt_iss_gain.Text) + 5
+                self.txt_iss_gain.Text = "%d" % int(val)
+                event.Handled = True
+            elif event.KeyCode == Keys.Left:
+                val = max(0, float(self.txt_iss_gain.Text) - 5)
+                self.txt_iss_gain.Text = "%d" % int(val)
+                event.Handled = True
+        except ValueError:
+            pass
 
 # --- ENTRY POINT ---
 if __name__ == "__main__":

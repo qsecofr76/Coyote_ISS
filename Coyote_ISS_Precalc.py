@@ -2,6 +2,7 @@ import sys
 import os
 import json
 import time
+import math
 import socket
 import struct
 import datetime
@@ -319,6 +320,9 @@ class CoyoteISSPrecalcApp:
         self.btn_generate = ttk.Button(generate_frame, text="Genera Traiettoria e Salva con Nome (Save As)", style="Green.TButton", state=tk.DISABLED, command=self.generate_and_save)
         self.btn_generate.pack(side=tk.RIGHT, padx=5)
         
+        self.btn_map = ttk.Button(generate_frame, text="Visualizza Mappa del Cielo", style="Primary.TButton", state=tk.DISABLED, command=self.show_sky_map)
+        self.btn_map.pack(side=tk.RIGHT, padx=5)
+        
         # Log Box
         log_frame = ttk.Frame(main_frame)
         log_frame.pack(fill=tk.X)
@@ -574,9 +578,11 @@ class CoyoteISSPrecalcApp:
             idx = int(item['values'][0]) - 1
             self.selected_pass_idx = idx
             self.btn_generate.configure(state=tk.NORMAL)
+            self.btn_map.configure(state=tk.NORMAL)
         else:
             self.selected_pass_idx = None
             self.btn_generate.configure(state=tk.DISABLED)
+            self.btn_map.configure(state=tk.DISABLED)
 
     def generate_and_save(self):
         if self.selected_pass_idx is None or not self.passes_data or not self.tle_lines:
@@ -776,6 +782,292 @@ class CoyoteISSPrecalcApp:
             self.root.after(0, lambda: self.btn_generate.configure(state=tk.NORMAL))
             
         threading.Thread(target=run_generation, daemon=True).start()
+
+    def show_sky_map(self):
+        if self.selected_pass_idx is None or not self.passes_data or not self.tle_lines:
+            return
+            
+        inputs = self.get_inputs()
+        if not inputs:
+            return
+            
+        lat, lon, elev, intercept_alt = inputs
+        selected_pass = self.passes_data[self.selected_pass_idx]
+        
+        # Calculate t_intercept and trajectory on the fly
+        try:
+            ts = load.timescale()
+            iss = EarthSatellite(self.tle_lines[1], self.tle_lines[2], self.tle_lines[0], ts)
+            observer = wgs84.latlon(lat, lon, elev)
+            
+            t_rise = selected_pass['rise']
+            t_culm = selected_pass['culmination']
+            t_set = selected_pass['set']
+            
+            # Find intercept time
+            low = t_rise.tt
+            high = t_culm.tt
+            for _ in range(24):
+                mid = (low + high) / 2.0
+                pos = (iss - observer).at(ts.tt_jd(mid))
+                alt, _, _ = pos.altaz()
+                if alt.degrees < intercept_alt:
+                    low = mid
+                else:
+                    high = mid
+            t_intercept = ts.tt_jd(low)
+            
+            # Find descent time
+            low_desc = t_culm.tt
+            high_desc = t_set.tt
+            for _ in range(24):
+                mid = (low_desc + high_desc) / 2.0
+                pos = (iss - observer).at(ts.tt_jd(mid))
+                alt, _, _ = pos.altaz()
+                if alt.degrees >= intercept_alt:
+                    low_desc = mid
+                else:
+                    high_desc = mid
+            t_descent = ts.tt_jd(low_desc)
+            
+            # Trajectory range: 10 seconds before intercept, 5 seconds after descent crossing
+            t_start_val = t_intercept.utc_datetime() - datetime.timedelta(seconds=10)
+            t_end_val = t_descent.utc_datetime() + datetime.timedelta(seconds=5)
+            
+            t_start_epoch = t_start_val.replace(tzinfo=datetime.timezone.utc).timestamp()
+            t_end_epoch = t_end_val.replace(tzinfo=datetime.timezone.utc).timestamp()
+            
+            dt = 0.5  # 2 Hz is enough for drawing
+            num_steps = int((t_end_epoch - t_start_epoch) / dt) + 1
+            epochs = [t_start_epoch + i * dt for i in range(num_steps)]
+            
+            dts = [datetime.datetime.fromtimestamp(ep, tz=datetime.timezone.utc) for ep in epochs]
+            times_sf = ts.from_datetimes(dts)
+            
+            positions = (iss - observer).at(times_sf)
+            
+            # Trajectory coordinates in RA/Dec JNow
+            ras_traj, decs_traj, _ = positions.radec(epoch='date')
+            traj_points = list(zip(ras_traj.hours, decs_traj.degrees))
+            
+            # Center coordinates (intercept point)
+            pos_int = (iss - observer).at(t_intercept)
+            ra_int, dec_int, _ = pos_int.radec(epoch='date')
+            ra_center_hours = ra_int.hours
+            dec_center_deg = dec_int.degrees
+            
+        except Exception as e:
+            messagebox.showerror("Errore Mappa", "Errore nel calcolo del passaggio per la mappa:\n" + str(e))
+            return
+
+        # Load stars of mag <= 4.5
+        stars = []
+        if os.path.exists("hip_main.dat"):
+            try:
+                with open("hip_main.dat", "r", errors="ignore") as f:
+                    for line in f:
+                        if line.startswith("H|"):
+                            parts = line.split("|")
+                            if len(parts) >= 10:
+                                try:
+                                    mag_str = parts[5].strip()
+                                    if mag_str:
+                                        mag = float(mag_str)
+                                        if mag <= 4.5:
+                                            hip_id = int(parts[1].strip())
+                                            ra_deg = float(parts[8].strip())
+                                            dec_deg = float(parts[9].strip())
+                                            stars.append({
+                                                "hip": hip_id,
+                                                "mag": mag,
+                                                "ra": ra_deg,
+                                                "dec": dec_deg
+                                            })
+                                except ValueError:
+                                    pass
+            except Exception as e:
+                print("Error loading stars catalog:", e)
+        else:
+            messagebox.showwarning("Catalogo Stelle Mancante", 
+                "Il file 'hip_main.dat' non è presente nella cartella.\n"
+                "La mappa mostrerà solo la traiettoria della ISS senza le stelle dello sfondo.\n"
+                "Riavvia il precalcolatore per scaricare il catalogo.")
+
+        # Display Toplevel Sky Map Window
+        map_win = tk.Toplevel(self.root)
+        map_win.title("Simulazione Passaggio & Stelle di Campo - Coyote ISS")
+        map_win.geometry("900x650")
+        map_win.configure(bg="#1c1c1e")
+        
+        # Left Panel (Canvas)
+        canvas_frame = tk.Frame(map_win, bg="#1c1c1e")
+        canvas_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=15, pady=15)
+        
+        canvas_size = 550
+        canvas = tk.Canvas(canvas_frame, width=canvas_size, height=canvas_size, bg="#0b0b0d", highlightthickness=0)
+        canvas.pack(fill=tk.BOTH, expand=True)
+        
+        # Right Panel (Settings & Stars List)
+        right_frame = tk.Frame(map_win, bg="#2c2c2e", width=300)
+        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, padx=15, pady=15)
+        right_frame.pack_propagate(False)
+        
+        lbl_right_title = tk.Label(right_frame, text="INFO INTERCETTAZIONE", font=('Segoe UI Semibold', 10, 'bold'), fg="#0a84ff", bg="#2c2c2e")
+        lbl_right_title.pack(anchor=tk.W, padx=10, pady=(10, 5))
+        
+        # Print info
+        local_tz = datetime.datetime.now().astimezone().tzinfo
+        dt_int_local = t_intercept.utc_datetime().replace(tzinfo=datetime.timezone.utc).astimezone(local_tz)
+        info_txt = (
+            "Centro Mappa (Intercettazione):\n"
+            "A.R.: %.4fh\n"
+            "Dec: %.3f°\n"
+            "Ora Intercettazione: %s\n"
+            "Alt: %.1f° | Az: %.1f°\n"
+        ) % (ra_center_hours, dec_center_deg, dt_int_local.strftime('%H:%M:%S'), selected_pass['max_alt'], selected_pass['culmination_az'])
+        
+        lbl_info = tk.Label(right_frame, text=info_txt, font=('Segoe UI', 9), fg="#ffffff", bg="#2c2c2e", justify=tk.LEFT, anchor=tk.W)
+        lbl_info.pack(anchor=tk.W, fill=tk.X, padx=10, pady=(0, 10))
+        
+        # Zoom / FOV Slider
+        lbl_zoom = tk.Label(right_frame, text="Campo Inquadrato (FOV):", font=('Segoe UI Semibold', 9, 'bold'), fg="#ffffff", bg="#2c2c2e")
+        lbl_zoom.pack(anchor=tk.W, padx=10)
+        
+        fov_var = tk.DoubleVar()
+        fov_var.set(20.0) # default 20 degrees
+        
+        def update_fov(val):
+            redraw()
+            
+        slider_fov = tk.Scale(right_frame, from_=5.0, to_=40.0, resolution=1.0, orient=tk.HORIZONTAL, variable=fov_var, command=update_fov, bg="#2c2c2e", fg="#ffffff", highlightthickness=0)
+        slider_fov.pack(fill=tk.X, padx=10, pady=(0, 15))
+        
+        # Nearby Stars List
+        lbl_stars_list = tk.Label(right_frame, text="Stelle Vicine (Mag < 4.0):", font=('Segoe UI Semibold', 9, 'bold'), fg="#ffffff", bg="#2c2c2e")
+        lbl_stars_list.pack(anchor=tk.W, padx=10, pady=(5, 5))
+        
+        list_box = tk.Listbox(right_frame, bg="#1c1c1e", fg="#ffffff", selectbackground="#0a84ff", font=('Segoe UI', 8), borderwidth=0, highlightthickness=0)
+        list_box.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        
+        # Common Stars Names mapping
+        COMMON_STARS = {
+            32349: "Sirio", 30438: "Canopo", 69673: "Arturo", 91262: "Vega",
+            24608: "Capella", 24436: "Rigel", 37279: "Procione", 27989: "Betelgeuse",
+            97649: "Altair", 21421: "Aldebaran", 65474: "Spica", 80763: "Antares",
+            37826: "Polluce", 113368: "Fomalhaut", 102098: "Deneb", 49669: "Regolo",
+            11767: "Stella Polare", 36850: "Castore", 71683: "Rigil Kent.",
+            25428: "Bellatrix", 27366: "Elnath", 81065: "Shaula", 26311: "Alnilam",
+            84012: "Kaus Austr.", 68702: "Hadar", 61084: "Mimosa", 60718: "Acrux",
+            49583: "Alioth", 67301: "Mizar", 54061: "Merak", 53910: "Dubhe",
+            58001: "Phecda", 62956: "Alkaid", 109268: "Alnair", 15863: "Mirfak",
+            76267: "Ras Alhague", 9884: "Hamal", 86032: "Sabik", 34444: "Adhara",
+            112440: "Markab", 113136: "Scheat", 113963: "Algenib", 5447: "Alpheratz",
+            98298: "Peacock", 109074: "Altais", 14354: "Algol", 95853: "Tarazed"
+        }
+        
+        def redraw():
+            canvas.delete("all")
+            list_box.delete(0, tk.END)
+            
+            fov = fov_var.get()
+            center_x = canvas_size / 2.0
+            center_y = canvas_size / 2.0
+            scale = (canvas_size / 2.0) / (fov / 2.0)  # pixels per degree
+            
+            c_dec = math.radians(dec_center_deg)
+            c_ra = math.radians(ra_center_hours * 15.0)
+            
+            # 1. Draw grid circles
+            # Draw FOV boundary circle
+            canvas.create_oval(10, 10, canvas_size - 10, canvas_size - 10, outline="#2c2c2e", width=1)
+            # Center target crosshair
+            canvas.create_oval(center_x - 12, center_y - 12, center_x + 12, center_y + 12, outline="#ff453a", width=1.5)
+            canvas.create_line(center_x - 20, center_y, center_x + 20, center_y, fill="#ff453a", width=1.5)
+            canvas.create_line(center_x, center_y - 20, center_x, center_y + 20, fill="#ff453a", width=1.5)
+            
+            # 2. Draw Cardinal Points
+            canvas.create_text(center_x, 25, text="N", fill="#3a3a3c", font=('Segoe UI Bold', 12))
+            canvas.create_text(center_x, canvas_size - 25, text="S", fill="#3a3a3c", font=('Segoe UI Bold', 12))
+            canvas.create_text(25, center_y, text="E", fill="#3a3a3c", font=('Segoe UI Bold', 12))
+            canvas.create_text(canvas_size - 25, center_y, text="W", fill="#3a3a3c", font=('Segoe UI Bold', 12))
+            
+            # 3. Project and draw stars
+            nearby_stars = []
+            for s in stars:
+                s_ra = math.radians(s['ra'])
+                s_dec = math.radians(s['dec'])
+                
+                # Orthographic projection
+                ra_diff = s_ra - c_ra
+                x = -math.sin(ra_diff) * math.cos(s_dec)
+                y = math.sin(s_dec) * math.cos(c_dec) - math.cos(s_dec) * math.sin(c_dec) * math.cos(ra_diff)
+                
+                # Convert to degrees
+                x_deg = math.degrees(x)
+                y_deg = math.degrees(y)
+                
+                # Distance from center in degrees
+                dist_deg = math.sqrt(x_deg**2 + y_deg**2)
+                
+                if dist_deg <= fov / 2.0:
+                    cx = center_x + x_deg * scale
+                    cy = center_y - y_deg * scale
+                    
+                    # Draw star circle
+                    r = max(1, int(5.5 - s['mag']))
+                    color = "#ffffff"
+                    if s['mag'] < 1.5:
+                        color = "#ffcc00"  # Bright yellow stars
+                    
+                    canvas.create_oval(cx - r, cy - r, cx + r, cy + r, fill=color, outline=color)
+                    
+                    # Label stars of mag <= 3.0 or common name
+                    name = COMMON_STARS.get(s['hip'], "")
+                    if name or s['mag'] <= 3.0:
+                        lbl_text = name if name else "HIP %d" % s['hip']
+                        lbl_text += " (%.1f)" % s['mag']
+                        canvas.create_text(cx + r + 4, cy - 4, text=lbl_text, fill="#a2a2a7", font=('Segoe UI', 7), anchor=tk.W)
+                    
+                    if s['mag'] <= 4.0:
+                        nearby_stars.append({
+                            "name": name if name else "HIP %d" % s['hip'],
+                            "mag": s['mag'],
+                            "dist": dist_deg
+                        })
+            
+            # Sort nearby stars by distance from center
+            nearby_stars.sort(key=lambda s: s['dist'])
+            for s in nearby_stars:
+                list_box.insert(tk.END, "%s | Mag: %.2f | Dist: %.2f°" % (s['name'], s['mag'], s['dist']))
+                
+            # 4. Project and draw ISS trajectory
+            traj_pixels = []
+            for ra_val, dec_val in traj_points:
+                s_ra = math.radians(ra_val * 15.0)
+                s_dec = math.radians(dec_val)
+                
+                ra_diff = s_ra - c_ra
+                x = -math.sin(ra_diff) * math.cos(s_dec)
+                y = math.sin(s_dec) * math.cos(c_dec) - math.cos(s_dec) * math.sin(c_dec) * math.cos(ra_diff)
+                
+                x_deg = math.degrees(x)
+                y_deg = math.degrees(y)
+                
+                cx = center_x + x_deg * scale
+                cy = center_y - y_deg * scale
+                
+                # Draw lines only within FOV boundary
+                dist_deg = math.sqrt(x_deg**2 + y_deg**2)
+                if dist_deg <= fov / 2.0:
+                    traj_pixels.append((cx, cy))
+            
+            # Draw path line
+            if len(traj_pixels) >= 2:
+                for i in range(len(traj_pixels) - 1):
+                    canvas.create_line(traj_pixels[i][0], traj_pixels[i][1], traj_pixels[i+1][0], traj_pixels[i+1][1], fill="#30d158", width=2)
+                    
+        # Initial draw
+        redraw()
 
 # --- ENTRY POINT ---
 if __name__ == "__main__":

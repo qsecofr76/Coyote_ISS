@@ -4,6 +4,9 @@ config.json
 # Local TLE Cache
 iss_tle.txt
 
+# Stars Catalog
+hip_main.dat
+
 # Generated Trajectories
 *_Coyote_ISS.json
 Coyote_ISS.json
