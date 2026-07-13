@@ -1,0 +1,15 @@
+# User-specific configuration
+config.json
+
+# Local TLE Cache
+iss_tle.txt
+
+# Generated Trajectories
+*_Coyote_ISS.json
+Coyote_ISS.json
+
+# Python byte-code / cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
