@@ -45,7 +45,8 @@ DEFAULT_CONFIG = {
     "latitude": 45.4642,    # Default Milano
     "longitude": 9.1900,
     "elevation": 120.0,
-    "intercept_alt": 10.0
+    "intercept_alt": 10.0,
+    "min_alt": 10.0
 }
 
 # --- HELPERS ---
@@ -72,20 +73,52 @@ def angle_diff(target, current):
     return diff
 
 # --- NTP SYNC CORE ---
-def get_ntp_time(server="pool.ntp.org"):
-    client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    client.settimeout(3.0)
-    data = b'\x1b' + 47 * b'\0'
-    try:
-        client.sendto(data, (server, 123))
-        data, _ = client.recvfrom(1024)
-        if data:
-            t = struct.unpack('!12I', data)[10]
-            t -= 2208988800  # Convert to Unix epoch
-            return t
-    except Exception as e:
-        print("NTP Error:", e)
-    return None
+def get_precise_ntp_offset(server="pool.ntp.org", attempts=5):
+    best_rtt = float('inf')
+    best_offset = None
+    
+    for i in range(attempts):
+        client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        client.settimeout(1.5)
+        # NTP v4 client request packet
+        data = b'\x1b' + 47 * b'\0'
+        try:
+            T1 = time.time()
+            client.sendto(data, (server, 123))
+            resp_data, _ = client.recvfrom(1024)
+            T4 = time.time()
+            
+            if len(resp_data) >= 48:
+                unpacked = struct.unpack('!12I', resp_data[:48])
+                # T2: Receive Timestamp (bytes 32-39)
+                t2_sec = unpacked[8]
+                t2_frac = unpacked[9]
+                T2 = t2_sec + float(t2_frac) / 2**32 - 2208988800.0
+                
+                # T3: Transmit Timestamp (bytes 40-47)
+                t3_sec = unpacked[10]
+                t3_frac = unpacked[11]
+                T3 = t3_sec + float(t3_frac) / 2**32 - 2208988800.0
+                
+                rtt = (T4 - T1) - (T3 - T2)
+                if rtt < 0:
+                    rtt = T4 - T1  # fallback
+                    
+                offset = ((T2 - T1) + (T3 - T4)) / 2.0
+                
+                print("NTP Attempt %d: RTT=%.4fs, Offset=%+.4fs" % (i+1, rtt, offset))
+                
+                if rtt < best_rtt:
+                    best_rtt = rtt
+                    best_offset = offset
+        except Exception as e:
+            print("NTP Attempt %d failed: %s" % (i+1, str(e)))
+        finally:
+            client.close()
+            
+        time.sleep(0.05)
+        
+    return best_offset, best_rtt
 
 def set_system_time(epoch_time):
     # Sets Windows system time
@@ -145,7 +178,8 @@ class CoyoteISSPrecalcApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Coyote ISS - Offline Precalculator")
-        self.root.geometry("820x640")
+        self.root.geometry("980x820")
+        self.root.minsize(980, 820)
         self.root.configure(bg="#1c1c1e")
         
         # Check if libraries are loaded
@@ -176,6 +210,7 @@ class CoyoteISSPrecalcApp:
         self.setup_styles()
         self.create_widgets()
         self.load_inputs_from_config()
+        self.update_gps_preview()
         
         self.log_message("Sistema pronto. Inserisci le coordinate e premi 'Aggiorna Passaggi'.")
         
@@ -248,12 +283,12 @@ class CoyoteISSPrecalcApp:
         
         # Form grid
         # Col 0: Lat
-        ttk.Label(control_frame, text="Latitudine (Deg):").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
+        ttk.Label(control_frame, text="Latitudine (Deg/DMS):").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
         self.entry_lat = ttk.Entry(control_frame, width=12)
         self.entry_lat.grid(row=0, column=1, padx=5, pady=5)
         
         # Col 2: Lon
-        ttk.Label(control_frame, text="Longitudine (Deg):").grid(row=0, column=2, padx=5, pady=5, sticky=tk.W)
+        ttk.Label(control_frame, text="Longitudine (Deg/DMS):").grid(row=0, column=2, padx=5, pady=5, sticky=tk.W)
         self.entry_lon = ttk.Entry(control_frame, width=12)
         self.entry_lon.grid(row=0, column=3, padx=5, pady=5)
         
@@ -267,9 +302,32 @@ class CoyoteISSPrecalcApp:
         self.entry_intercept_alt = ttk.Entry(control_frame, width=8)
         self.entry_intercept_alt.grid(row=0, column=7, padx=5, pady=5)
         
-        # Button container in the control frame
+        # Row 1: Min Slew Stop Altitude
+        ttk.Label(control_frame, text="Alt. Minima Fine Corsa (°):").grid(row=1, column=0, padx=5, pady=5, sticky=tk.W)
+        self.entry_min_alt = ttk.Entry(control_frame, width=12)
+        self.entry_min_alt.grid(row=1, column=1, padx=5, pady=5)
+        
+        # Help label for DMS format coordinates (row 2)
+        lbl_help_dms = ttk.Label(
+            control_frame, 
+            text="* Nota: Lat e Lon accettano valori decimali (es. 45.8393) o DMS (es. 45° 50' 21\" N o 45:50:21)", 
+            font=('Segoe UI Italic', 8), 
+            foreground='#8e8e93'
+        )
+        lbl_help_dms.grid(row=2, column=0, columnspan=8, pady=(5, 0), sticky=tk.W)
+        
+        # Preview label for parsed coordinates (decimal & DMS) (row 3)
+        self.lbl_gps_preview = ttk.Label(
+            control_frame, 
+            text="Anteprima GPS: -", 
+            font=('Segoe UI Semibold', 9), 
+            foreground='#8e8e93'
+        )
+        self.lbl_gps_preview.grid(row=3, column=0, columnspan=8, pady=(5, 0), sticky=tk.W)
+        
+        # Button container in the control frame (shifted to row 4)
         btn_frame = ttk.Frame(control_frame)
-        btn_frame.grid(row=1, column=0, columnspan=8, pady=(10, 0), sticky=tk.EW)
+        btn_frame.grid(row=4, column=0, columnspan=8, pady=(10, 0), sticky=tk.EW)
         
         self.btn_save_config = ttk.Button(btn_frame, text="Salva Config", style="Secondary.TButton", command=self.save_inputs)
         self.btn_save_config.pack(side=tk.LEFT, padx=5)
@@ -282,6 +340,10 @@ class CoyoteISSPrecalcApp:
         
         self.btn_update_passes = ttk.Button(btn_frame, text="Aggiorna Passaggi ISS", style="Primary.TButton", command=self.update_passes)
         self.btn_update_passes.pack(side=tk.RIGHT, padx=5)
+        
+        # Bind events to update preview dynamically
+        self.entry_lat.bind("<KeyRelease>", self.update_gps_preview)
+        self.entry_lon.bind("<KeyRelease>", self.update_gps_preview)
         
         # Table of visible passes
         table_frame = ttk.LabelFrame(main_frame, text=" Passaggi ISS Selezionabili (Prossimi 3 Giorni) ", padding="10")
@@ -317,6 +379,14 @@ class CoyoteISSPrecalcApp:
         generate_frame = ttk.Frame(main_frame)
         generate_frame.pack(fill=tk.X, pady=(0, 5))
         
+        self.lbl_meridian = ttk.Label(
+            generate_frame,
+            text="Meridian Flip (Equatoriale): N/D",
+            font=('Segoe UI Semibold', 10),
+            foreground='#8e8e93'
+        )
+        self.lbl_meridian.pack(side=tk.LEFT, padx=5, pady=5)
+        
         self.btn_generate = ttk.Button(generate_frame, text="Genera Traiettoria e Salva con Nome (Save As)", style="Green.TButton", state=tk.DISABLED, command=self.generate_and_save)
         self.btn_generate.pack(side=tk.RIGHT, padx=5)
         
@@ -334,13 +404,83 @@ class CoyoteISSPrecalcApp:
         self.entry_lon.insert(0, str(self.config.get("longitude", DEFAULT_CONFIG["longitude"])))
         self.entry_elev.insert(0, str(self.config.get("elevation", DEFAULT_CONFIG["elevation"])))
         self.entry_intercept_alt.insert(0, str(self.config.get("intercept_alt", DEFAULT_CONFIG["intercept_alt"])))
+        self.entry_min_alt.insert(0, str(self.config.get("min_alt", DEFAULT_CONFIG["min_alt"])))
+
+    def parse_dms_or_decimal(self, val_str):
+        val_str = val_str.strip()
+        if not val_str:
+            raise ValueError("Valore coordinata vuoto.")
+            
+        # Prova prima il parsing decimale diretto
+        try:
+            return float(val_str)
+        except ValueError:
+            pass
+            
+        # Parsing DMS (regex per estrarre tutti i numeri)
+        import re
+        numbers = re.findall(r'[-+]?\d*\.\d+|\d+', val_str)
+        if not numbers:
+            raise ValueError("Formato coordinata non riconosciuto (nessun numero trovato).")
+            
+        d = float(numbers[0])
+        m = float(numbers[1]) if len(numbers) > 1 else 0.0
+        s = float(numbers[2]) if len(numbers) > 2 else 0.0
+        
+        dec_val = abs(d) + m / 60.0 + s / 3600.0
+        
+        # Gestione del segno basata sul primo valore e sulle lettere cardinali (Sud/Ovest -> negativo)
+        val_lower = val_str.lower()
+        is_negative = (d < 0) or ("s" in val_lower) or ("w" in val_lower)
+        
+        return -dec_val if is_negative else dec_val
+
+    def update_gps_preview(self, *args):
+        lat_str = self.entry_lat.get()
+        lon_str = self.entry_lon.get()
+        
+        # Helper to convert decimal degrees to DMS string representation
+        def decimal_to_dms(val, is_lat=True):
+            direction = ""
+            if is_lat:
+                direction = "N" if val >= 0 else "S"
+            else:
+                direction = "E" if val >= 0 else "W"
+            val = abs(val)
+            d = int(val)
+            m_float = (val - d) * 60.0
+            m = int(m_float)
+            s = (m_float - m) * 60.0
+            return f"{d}° {m}' {s:.2f}\" {direction}"
+
+        try:
+            lat_dec = self.parse_dms_or_decimal(lat_str)
+            lon_dec = self.parse_dms_or_decimal(lon_str)
+            
+            # Check limits
+            if not (-90 <= lat_dec <= 90) or not (-180 <= lon_dec <= 180):
+                raise ValueError("Coordinate fuori range geografico.")
+                
+            lat_dms = decimal_to_dms(lat_dec, True)
+            lon_dms = decimal_to_dms(lon_dec, False)
+            
+            self.lbl_gps_preview.configure(
+                text=f"Anteprima GPS:  [Decimale: {lat_dec:.6f}°, {lon_dec:.6f}°]  |  [DMS: {lat_dms}, {lon_dms}]",
+                foreground='#30d158'  # Nice green color for valid
+            )
+        except Exception:
+            self.lbl_gps_preview.configure(
+                text="Anteprima GPS: [Inserisci coordinate valide]",
+                foreground='#ff453a'  # System red for invalid/incomplete
+            )
 
     def get_inputs(self):
         try:
-            lat = float(self.entry_lat.get())
-            lon = float(self.entry_lon.get())
+            lat = self.parse_dms_or_decimal(self.entry_lat.get())
+            lon = self.parse_dms_or_decimal(self.entry_lon.get())
             elev = float(self.entry_elev.get())
             intercept_alt = float(self.entry_intercept_alt.get())
+            min_alt = float(self.entry_min_alt.get())
             
             if not (-90 <= lat <= 90):
                 raise ValueError("La latitudine deve essere tra -90 e 90 gradi.")
@@ -350,8 +490,10 @@ class CoyoteISSPrecalcApp:
                 raise ValueError("Elevazione non realistica.")
             if not (0 < intercept_alt < 90):
                 raise ValueError("L'altezza di intercettazione deve essere compresa tra 0 e 90 gradi.")
+            if not (0 <= min_alt < 90):
+                raise ValueError("L'altezza minima di fine corsa deve essere compresa tra 0 e 90 gradi.")
                 
-            return lat, lon, elev, intercept_alt
+            return lat, lon, elev, intercept_alt, min_alt
         except ValueError as e:
             messagebox.showerror("Errore Input", f"Controlla i dati inseriti:\n{e}")
             return None
@@ -359,11 +501,12 @@ class CoyoteISSPrecalcApp:
     def save_inputs(self):
         inputs = self.get_inputs()
         if inputs:
-            lat, lon, elev, intercept_alt = inputs
+            lat, lon, elev, intercept_alt, min_alt = inputs
             self.config["latitude"] = lat
             self.config["longitude"] = lon
             self.config["elevation"] = elev
             self.config["intercept_alt"] = intercept_alt
+            self.config["min_alt"] = min_alt
             save_config(self.config)
             self.log_message("Configurazione salvata con successo.")
             messagebox.showinfo("Configurazione", "Configurazione salvata correttamente.")
@@ -407,6 +550,7 @@ class CoyoteISSPrecalcApp:
                         self.entry_elev.delete(0, tk.END)
                         self.entry_elev.insert(0, "%.1f" % elev)
                         
+                        self.update_gps_preview()
                         self.log_message("Posizione rilevata con successo da IP.")
                         messagebox.showinfo("Posizione Rilevata", 
                             "Posizione rilevata con successo!\n\n"
@@ -440,30 +584,33 @@ class CoyoteISSPrecalcApp:
         self.log_message("Sincronizzazione orologio in corso...")
         
         def run_sync():
-            ntp_time = get_ntp_time()
-            if ntp_time is None:
+            offset, rtt = get_precise_ntp_offset()
+            if offset is None:
                 self.root.after(0, lambda: self.log_message("Errore: Impossibile contattare il server NTP."))
                 self.root.after(0, lambda: messagebox.showerror("Errore Sincronizzazione", "Impossibile ottenere l'ora dal server NTP pool.ntp.org. Controlla la connessione internet."))
                 self.root.after(0, lambda: self.btn_sync_clock.configure(state=tk.NORMAL))
                 return
             
-            local_now = time.time()
-            offset = ntp_time - local_now
+            # Calculate target epoch time quickly
+            target_time = time.time() + offset
             
             # Try to set clock
             success = False
             try:
-                success = set_system_time(ntp_time)
+                success = set_system_time(target_time)
             except Exception as e:
                 print("Set System Time Exception:", e)
                 
             if success:
-                self.root.after(0, lambda: self.log_message(f"Orologio sincronizzato con successo. Offset: {offset:+.3f}s"))
-                self.root.after(0, lambda: messagebox.showinfo("Orologio Sincronizzato", f"L'orologio di sistema è stato sincronizzato con successo.\nOffset corretto: {offset:+.3f} secondi."))
+                self.root.after(0, lambda: self.log_message(f"Orologio sincronizzato. Offset: {offset:+.3f}s | RTT: {rtt:.4f}s"))
+                self.root.after(0, lambda: messagebox.showinfo("Orologio Sincronizzato", 
+                    f"L'orologio di sistema è stato sincronizzato con successo.\n\n"
+                    f"Offset corretto: {offset:+.3f} secondi\n"
+                    f"Latenza di rete (RTT): {rtt:.4f} secondi."))
             else:
-                self.root.after(0, lambda: self.log_message(f"Fallito (Offset rilevato: {offset:+.3f}s). Esegui come Amministratore!"))
+                self.root.after(0, lambda: self.log_message(f"Fallito (Offset: {offset:+.3f}s | RTT: {rtt:.4f}s). Esegui come Amministratore!"))
                 self.root.after(0, lambda: messagebox.showwarning("Permesso Negato", 
-                    f"Rilevato offset di {offset:+.3f} secondi.\n\n"
+                    f"Rilevato offset di {offset:+.3f} secondi (RTT: {rtt:.4f}s).\n\n"
                     "Impossibile impostare l'ora di sistema per mancanza di autorizzazioni.\n"
                     "Avvia questo programma come AMMINISTRATORE (tasto destro -> Esegui come Amministratore) "
                     "per sincronizzare l'orologio automaticamente, oppure installa un client NTP come Meinberg NTP."))
@@ -477,7 +624,7 @@ class CoyoteISSPrecalcApp:
         if not inputs:
             return
         
-        lat, lon, elev, _ = inputs
+        lat, lon, elev = inputs[:3]
         self.btn_update_passes.configure(state=tk.DISABLED)
         self.btn_generate.configure(state=tk.DISABLED)
         self.log_message("Scaricamento TLE e calcolo passaggi in corso...")
@@ -568,6 +715,8 @@ class CoyoteISSPrecalcApp:
             
             self.tree.insert("", tk.END, values=(idx + 1, date_str, time_str, duration_str, max_alt_str, dir_str))
             
+        self.selected_pass_idx = None
+        self.lbl_meridian.configure(text="Meridian Flip (Equatoriale): N/D", foreground='#8e8e93')
         self.btn_update_passes.configure(state=tk.NORMAL)
         self.log_message(f"Trovati {len(self.passes_data)} passaggi nei prossimi 3 giorni.")
 
@@ -579,10 +728,72 @@ class CoyoteISSPrecalcApp:
             self.selected_pass_idx = idx
             self.btn_generate.configure(state=tk.NORMAL)
             self.btn_map.configure(state=tk.NORMAL)
+            self.update_meridian_flip_status()
         else:
             self.selected_pass_idx = None
             self.btn_generate.configure(state=tk.DISABLED)
             self.btn_map.configure(state=tk.DISABLED)
+            self.lbl_meridian.configure(text="Meridian Flip (Equatoriale): N/D", foreground='#8e8e93')
+
+    def update_meridian_flip_status(self):
+        if self.selected_pass_idx is None or not self.passes_data or not self.tle_lines:
+            self.lbl_meridian.configure(text="Meridian Flip (Equatoriale): N/D", foreground="#8e8e93")
+            return
+            
+        inputs = self.get_inputs()
+        if not inputs:
+            self.lbl_meridian.configure(text="Meridian Flip (Equatoriale): N/D", foreground="#8e8e93")
+            return
+            
+        lat, lon, elev = inputs[:3]
+        selected_pass = self.passes_data[self.selected_pass_idx]
+        
+        try:
+            ts = load.timescale()
+            iss = EarthSatellite(self.tle_lines[1], self.tle_lines[2], self.tle_lines[0], ts)
+            observer = wgs84.latlon(lat, lon, elev)
+            
+            t_rise = selected_pass['rise']
+            t_set = selected_pass['set']
+            
+            # Generate 50 points from rise to set
+            dt_days = t_set.tt - t_rise.tt
+            times_tt = [t_rise.tt + i * (dt_days / 50.0) for i in range(51)]
+            times_sf = ts.tt_jd(times_tt)
+            
+            positions = (iss - observer).at(times_sf)
+            ras, _, _ = positions.radec(epoch='date')
+            
+            gmst = times_sf.gmst
+            lst = (gmst + lon / 15.0) % 24.0
+            ha = (lst - ras.hours) % 24.0
+            ha = (ha + 12.0) % 24.0 - 12.0
+            
+            crosses_meridian = False
+            for i in range(len(ha) - 1):
+                h1 = ha[i]
+                h2 = ha[i+1]
+                # Check if they cross HA = 0 and are not wrap-around (difference is small)
+                if h1 * h2 < 0 and abs(h1 - h2) < 2.0:
+                    crosses_meridian = True
+                    break
+            
+            if crosses_meridian:
+                self.lbl_meridian.configure(
+                    text="Meridian Flip (Equatoriale): SI (Richiede Inversione!)",
+                    foreground="#ff453a"  # System red
+                )
+            else:
+                self.lbl_meridian.configure(
+                    text="Meridian Flip (Equatoriale): No (Inseguimento Continuo)",
+                    foreground="#30d158"  # System green
+                )
+        except Exception as e:
+            print("Error calculating meridian flip:", e)
+            self.lbl_meridian.configure(
+                text="Meridian Flip (Equatoriale): Errore",
+                foreground="#ff9500"  # System orange
+            )
 
     def generate_and_save(self):
         if self.selected_pass_idx is None or not self.passes_data or not self.tle_lines:
@@ -592,7 +803,7 @@ class CoyoteISSPrecalcApp:
         if not inputs:
             return
             
-        lat, lon, elev, intercept_alt = inputs
+        lat, lon, elev, intercept_alt, min_alt = inputs
         selected_pass = self.passes_data[self.selected_pass_idx]
         
         # Validation: check if max altitude of selected pass is higher than intercept altitude
@@ -674,23 +885,23 @@ class CoyoteISSPrecalcApp:
                 t_intercept_tt = low
                 t_intercept = ts.tt_jd(t_intercept_tt)
                 
-                # Binary search for descent altitude crossing (when it goes below intercept_alt after culmination)
+                # Binary search for descent altitude crossing (when it goes below min_alt after culmination)
                 low_desc = t_culm.tt
                 high_desc = t_set.tt
                 for _ in range(24):
                     mid = (low_desc + high_desc) / 2.0
                     pos = (iss - observer).at(ts.tt_jd(mid))
                     alt, _, _ = pos.altaz()
-                    if alt.degrees >= intercept_alt:
+                    if alt.degrees >= min_alt:
                         low_desc = mid
                     else:
                         high_desc = mid
                 t_descent_tt = low_desc
                 t_descent = ts.tt_jd(t_descent_tt)
                 
-                # Trajectory range: start 10 seconds before intercept, end 5 seconds after descent crossing
+                # Trajectory range: start 10 seconds before intercept, and end EXACTLY at descent crossing (no padding to avoid dropping below min_alt)
                 t_start_val = t_intercept.utc_datetime() - datetime.timedelta(seconds=10)
-                t_end_val = t_descent.utc_datetime() + datetime.timedelta(seconds=5)
+                t_end_val = t_descent.utc_datetime()
                 
                 t_start_epoch = t_start_val.replace(tzinfo=datetime.timezone.utc).timestamp()
                 t_end_epoch = t_end_val.replace(tzinfo=datetime.timezone.utc).timestamp()
@@ -713,6 +924,24 @@ class CoyoteISSPrecalcApp:
                 ras, decs, _ = positions.radec(epoch='date')
                 ra_hours = ras.hours
                 dec_deg = decs.degrees
+                
+                # Calculate Hour Angle (HA) to find meridian tracking margin indices (+1h, +2h)
+                has, _, _ = positions.hadec()
+                ha_hours = has.hours
+                
+                idx_1h = None
+                idx_2h = None
+                min_diff_1h = float('inf')
+                min_diff_2h = float('inf')
+                for i, ha_val in enumerate(ha_hours):
+                    diff_1h = abs(ha_val - 1.0)
+                    if diff_1h < min_diff_1h and diff_1h < 0.1:
+                        min_diff_1h = diff_1h
+                        idx_1h = i
+                    diff_2h = abs(ha_val - 2.0)
+                    if diff_2h < min_diff_2h and diff_2h < 0.1:
+                        min_diff_2h = diff_2h
+                        idx_2h = i
                 
                 # Compute Interception coordinate values
                 pos_int = (iss - observer).at(t_intercept)
@@ -755,18 +984,39 @@ class CoyoteISSPrecalcApp:
                         ra_rate, dec_rate, alt_rate, az_rate
                     ))
                 
+                # Calculate Hour Angles over the generated trajectory to see if it crosses meridian
+                gmst_gen = times_sf.gmst
+                lst_gen = (gmst_gen + lon / 15.0) % 24.0
+                ha_gen = (lst_gen - ra_hours) % 24.0
+                ha_gen = (ha_gen + 12.0) % 24.0 - 12.0
+                
+                crosses_meridian = False
+                flip_idx = None
+                for i in range(len(ha_gen) - 1):
+                    h1 = ha_gen[i]
+                    h2 = ha_gen[i+1]
+                    if h1 * h2 < 0 and abs(h1 - h2) < 2.0:
+                        crosses_meridian = True
+                        flip_idx = i
+                        break
+
                 # Write to JSON data file
                 output_data = {
                     "OBSERVER_LAT": lat,
                     "OBSERVER_LON": lon,
                     "OBSERVER_HEIGHT": elev,
                     "INTERCEPT_ALT_TARGET": intercept_alt,
+                    "MIN_ALT_TARGET": min_alt,
                     "INTERCEPT_TIME": t_intercept.utc_datetime().replace(tzinfo=datetime.timezone.utc).timestamp(),
                     "INTERCEPT_LOCAL_TIME": local_time_str,
                     "INTERCEPT_RA": ra_int.hours,
                     "INTERCEPT_DEC": dec_int.degrees,
                     "INTERCEPT_ALT": alt_int.degrees,
                     "INTERCEPT_AZ": az_int.degrees,
+                    "REQUIRES_MERIDIAN_FLIP": crosses_meridian,
+                    "MERIDIAN_FLIP_INDEX": flip_idx,
+                    "HA_1H_INDEX": idx_1h,
+                    "HA_2H_INDEX": idx_2h,
                     "TRAJECTORY": trajectory_data
                 }
                 
@@ -774,7 +1024,9 @@ class CoyoteISSPrecalcApp:
                     json.dump(output_data, f, indent=4)
                 
                 self.root.after(0, lambda: self.log_message(f"File salvato con successo: {os.path.basename(file_path)}"))
-                self.root.after(0, lambda: messagebox.showinfo("Generazione Completata", f"Traiettoria generata con successo ({num_steps} punti a 10 Hz).\nFile salvato in:\n{file_path}"))
+                
+                flip_msg = "\n\n⚠️ ATTENZIONE: La traiettoria richiede un MERIDIAN FLIP (la montatura equatoriale dovrà invertire il meridiano durante l'inseguimento)!" if crosses_meridian else ""
+                self.root.after(0, lambda: messagebox.showinfo("Generazione Completata", f"Traiettoria generata con successo ({num_steps} punti a 10 Hz).\nFile salvato in:\n{file_path}{flip_msg}"))
             except Exception as e:
                 self.root.after(0, lambda: messagebox.showerror("Errore Generazione", f"Errore durante la generazione della traiettoria:\n{e}"))
                 self.root.after(0, lambda: self.log_message("Generazione fallita."))
@@ -791,7 +1043,7 @@ class CoyoteISSPrecalcApp:
         if not inputs:
             return
             
-        lat, lon, elev, intercept_alt = inputs
+        lat, lon, elev, intercept_alt, min_alt = inputs
         selected_pass = self.passes_data[self.selected_pass_idx]
         
         # Calculate t_intercept and trajectory on the fly

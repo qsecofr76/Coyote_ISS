@@ -1,0 +1,11 @@
+{
+    "kp": "1.0",
+    "inv_axis1": false,
+    "iss_gain": "250.0",
+    "is_altaz": true,
+    "star_exp": "3000.0",
+    "inv_axis0": false,
+    "star_gain": "350.0",
+    "iss_exp": "1.5",
+    "lead_time": "2.0"
+}
