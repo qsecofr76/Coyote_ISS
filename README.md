@@ -34,4 +34,7 @@ Ci sono però anche 3 tasti che permettono di spostare la montatura alle coordin
 premendo il tasto correzione in tutti e 3 i punti il software fa un plate solve senza il sync: potrebbe essere che il punto di partenza sia buono ma magari il treppiede è un po' storto e quindi 
 la traiettoria viene disattesa. Il plate solve sui 3 punti ci dovrebbe permettere di calcolare di quanto è sbagliato il movimento e attuare una correzione della traiettoria.
 
+Sotto ci sono 2 bottoni: ARMA fa partire effettivamente il tutto attendendo l'orario del passaggio. SIMULA fa partire tutto come ARMA ma senza attendere, per fare una prova reale del movimento che andrà a fare la montatura. 
+NB: ARMA e SIMULA muovono direttamente il motore della montatura mentre i bottoni dei 3 spostamenti GOTO comandano in effetti un GOTO alle coordinate (RA DEC/ ALT AZ) quindi è la montatura che decide da che parte muoversi in base a considerazioni sul meridian flip, antiattorcigliamenti vari e recuperi dei giochi.
+
 
