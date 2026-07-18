@@ -925,14 +925,18 @@ class CoyoteISSPrecalcApp:
                 ra_hours = ras.hours
                 dec_deg = decs.degrees
                 
-                # Calculate Hour Angle (HA) to find meridian tracking margin indices (+1h, +2h)
+                # Calculate Hour Angle (HA) to find meridian tracking margin indices (+1h, +2h, -1h, -2h)
                 has, _, _ = positions.hadec()
-                ha_hours = has.hours
+                ha_hours = [(h + 12.0) % 24.0 - 12.0 for h in has.hours]
                 
                 idx_1h = None
                 idx_2h = None
+                idx_minus1h = None
+                idx_minus2h = None
                 min_diff_1h = float('inf')
                 min_diff_2h = float('inf')
+                min_diff_minus1h = float('inf')
+                min_diff_minus2h = float('inf')
                 for i, ha_val in enumerate(ha_hours):
                     diff_1h = abs(ha_val - 1.0)
                     if diff_1h < min_diff_1h and diff_1h < 0.1:
@@ -942,6 +946,14 @@ class CoyoteISSPrecalcApp:
                     if diff_2h < min_diff_2h and diff_2h < 0.1:
                         min_diff_2h = diff_2h
                         idx_2h = i
+                    diff_minus1h = abs(ha_val - (-1.0))
+                    if diff_minus1h < min_diff_minus1h and diff_minus1h < 0.1:
+                        min_diff_minus1h = diff_minus1h
+                        idx_minus1h = i
+                    diff_minus2h = abs(ha_val - (-2.0))
+                    if diff_minus2h < min_diff_minus2h and diff_minus2h < 0.1:
+                        min_diff_minus2h = diff_minus2h
+                        idx_minus2h = i
                 
                 # Compute Interception coordinate values
                 pos_int = (iss - observer).at(t_intercept)
@@ -1000,6 +1012,26 @@ class CoyoteISSPrecalcApp:
                         flip_idx = i
                         break
 
+                # Calculate Sun position and check for close passes (safety warning)
+                min_sun_sep = 180.0
+                try:
+                    eph = load('de421.bsp')
+                    earth = eph['earth']
+                    sun = eph['sun']
+                    obs_body = earth + wgs84.latlon(lat, lon, elev)
+                    sun_positions = obs_body.at(times_sf).observe(sun).apparent()
+                    
+                    # Compute angular separation between ISS and Sun
+                    separations = positions.separation_from(sun_positions).degrees
+                    min_sun_sep = float(min(separations))
+                except Exception as e:
+                    self.root.after(0, lambda: self.log_message(f"Impossibile calcolare distanza dal Sole: {e}"))
+
+                sun_warning = ""
+                if min_sun_sep < 5.0:
+                    sun_warning = "\n\n⛔ PERICOLO SOLE: La ISS passa a soli %.2f° dal Sole! Non puntare la montatura o la camera in questa direzione di giorno per evitare danni irreparabili alla strumentazione o alla vista!" % min_sun_sep
+                    self.root.after(0, lambda: self.log_message("⚠️ PERICOLO: Passaggio vicino al Sole! Distanza minima: %.2f°" % min_sun_sep))
+
                 # Write to JSON data file
                 output_data = {
                     "OBSERVER_LAT": lat,
@@ -1017,6 +1049,8 @@ class CoyoteISSPrecalcApp:
                     "MERIDIAN_FLIP_INDEX": flip_idx,
                     "HA_1H_INDEX": idx_1h,
                     "HA_2H_INDEX": idx_2h,
+                    "HA_MINUS1H_INDEX": idx_minus1h,
+                    "HA_MINUS2H_INDEX": idx_minus2h,
                     "TRAJECTORY": trajectory_data
                 }
                 
@@ -1026,7 +1060,12 @@ class CoyoteISSPrecalcApp:
                 self.root.after(0, lambda: self.log_message(f"File salvato con successo: {os.path.basename(file_path)}"))
                 
                 flip_msg = "\n\n⚠️ ATTENZIONE: La traiettoria richiede un MERIDIAN FLIP (la montatura equatoriale dovrà invertire il meridiano durante l'inseguimento)!" if crosses_meridian else ""
-                self.root.after(0, lambda: messagebox.showinfo("Generazione Completata", f"Traiettoria generata con successo ({num_steps} punti a 10 Hz).\nFile salvato in:\n{file_path}{flip_msg}"))
+                alert_text = f"Traiettoria generata con successo ({num_steps} punti a 10 Hz).\nFile salvato in:\n{file_path}{flip_msg}{sun_warning}"
+                
+                if min_sun_sep < 5.0:
+                    self.root.after(0, lambda: messagebox.showwarning("PERICOLO SOLE", alert_text))
+                else:
+                    self.root.after(0, lambda: messagebox.showinfo("Generazione Completata", alert_text))
             except Exception as e:
                 self.root.after(0, lambda: messagebox.showerror("Errore Generazione", f"Errore durante la generazione della traiettoria:\n{e}"))
                 self.root.after(0, lambda: self.log_message("Generazione fallita."))

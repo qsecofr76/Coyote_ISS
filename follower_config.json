@@ -1,11 +1,13 @@
 {
-    "kp": "1.0",
     "inv_axis1": false,
+    "star_gain": "350.0",
+    "lead_time": "2.0",
     "iss_gain": "250.0",
-    "is_altaz": true,
+    "step_corr": "0.2495",
     "star_exp": "3000.0",
     "inv_axis0": false,
-    "star_gain": "350.0",
+    "focal_length": "1000.0",
+    "kp": "1.0",
     "iss_exp": "1.5",
-    "lead_time": "2.0"
+    "is_altaz": true
 }

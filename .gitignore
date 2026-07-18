@@ -16,3 +16,5 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+# Ephemeris database
+de421.bsp

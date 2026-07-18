@@ -114,8 +114,8 @@ class SharpISSFollowerForm(Form):
         else:
             print("[DEBUG] File icona coyote_iss_icon.png non trovato in: " + str(icon_path))
                 
-        self.Size = Size(1432, 695)
-        self.MinimumSize = Size(1432, 695)
+        self.Size = Size(1432, 800)
+        self.MinimumSize = Size(1432, 800)
         self.BackColor = Color.FromArgb(30, 30, 30)
         self.ForeColor = Color.White
         self.Font = Font("Segoe UI", 9)
@@ -129,8 +129,15 @@ class SharpISSFollowerForm(Form):
         self.abort_requested = False
         self.tracking_active = False
         self.last_traj_idx = 0
-        self.gui_com_tick_counter = 0
         self.block_ascom_until = 0.0
+        
+        # Manual trajectory offsets during tracking (degrees)
+        self.manual_offset_axis0 = 0.0
+        self.manual_offset_axis1 = 0.0
+        
+        # PI controller integral terms
+        self.track_integral_0 = 0.0
+        self.track_integral_1 = 0.0
         
         # Cached mount coordinates for visual bar and position checking
         self.cached_mount_ra = None
@@ -147,6 +154,8 @@ class SharpISSFollowerForm(Form):
         self.flip_idx = None
         self.ha_1h_idx = None
         self.ha_2h_idx = None
+        self.ha_minus1h_idx = None
+        self.ha_minus2h_idx = None
         self.pic_sky_map = None
         self.active_thread = None
         
@@ -201,7 +210,45 @@ class SharpISSFollowerForm(Form):
             
         # Attempt to auto-connect to SharpCap mount
         self.auto_connect_mount()
-        
+        self.recalculate_default_step()
+        self.FormClosing += self.on_form_closing
+
+    def on_form_closing(self, sender, event):
+        print("[DEBUG] Form in chiusura: arresto hardware e thread di tracciamento.")
+        self.abort_requested = True
+        try:
+            self.stop_hardware()
+        except Exception as e:
+            print("[ERRORE] stop_hardware durante chiusura form: " + str(e))
+
+    def recalculate_default_step(self):
+        try:
+            f_str = self.txt_focal.Text
+            f = float(f_str) if f_str else 1000.0
+            if f <= 0:
+                f = 1000.0
+        except Exception:
+            f = 1000.0
+            
+        try:
+            global SharpCap
+            if SharpCap is not None and SharpCap.SelectedCamera is not None:
+                cam = SharpCap.SelectedCamera
+                # Get resolution
+                img_size = cam.GetImageSize()
+                h = float(img_size.Height)
+                # Get pixel size in microns
+                pix_h = float(cam.PixelSize.Height)
+                # Formula: FOV_h = (h * pix_h / 1000) / f * (180 / pi)
+                # Step (1/3 FOV) = FOV_h / 3
+                step_default = (h * pix_h * 0.01909859) / f
+                
+                # Format to 4 decimal places
+                self.txt_step_corr.Text = "%.4f" % step_default
+                self.log("Ricalcolato step di correzione di default (1/3 FOV): %.4f°" % step_default)
+        except Exception as e:
+            pass
+            
     def log(self, text):
         timestamp = time.strftime("%H:%M:%S")
         lines = str(text).replace("\r\n", "\n").split("\n")
@@ -257,18 +304,21 @@ class SharpISSFollowerForm(Form):
             "iss_gain": "250.0",
             "is_altaz": True,
             "inv_axis0": False,
-            "inv_axis1": False
+            "inv_axis1": False,
+            "focal_length": "1000.0",
+            "step_corr": "0.05"
         }
         if os.path.exists(config_path):
             try:
                 with open(config_path, "r") as f:
                     loaded = json.load(f)
                     for k, v in loaded.items():
-                        # Support converting types correctly
-                        if isinstance(default_config[k], bool):
-                            default_config[k] = bool(v)
-                        else:
-                            default_config[k] = str(v)
+                        if k in default_config:
+                            # Support converting types correctly
+                            if isinstance(default_config[k], bool):
+                                default_config[k] = bool(v)
+                            else:
+                                default_config[k] = str(v)
             except Exception as e:
                 self.log("Errore caricamento configurazione follower: " + str(e))
         return default_config
@@ -287,7 +337,9 @@ class SharpISSFollowerForm(Form):
                 "iss_gain": self.txt_iss_gain.Text,
                 "is_altaz": self.chk_altaz.Checked,
                 "inv_axis0": self.chk_inv_axis0.Checked,
-                "inv_axis1": self.chk_inv_axis1.Checked
+                "inv_axis1": self.chk_inv_axis1.Checked,
+                "focal_length": self.txt_focal.Text,
+                "step_corr": self.txt_step_corr.Text
             }
             with open(config_path, "w") as f:
                 json.dump(config, f, indent=4)
@@ -483,11 +535,26 @@ class SharpISSFollowerForm(Form):
         self.txt_lead.BackColor = Color.FromArgb(44, 44, 46)
         self.txt_lead.ForeColor = Color.White
         self.Controls.Add(self.txt_lead)
+        # Row 4: Focal length
+        lbl_foc = Label()
+        lbl_foc.Text = "Focale (mm):"
+        lbl_foc.Location = Point(10, 362)
+        lbl_foc.Size = Size(100, 20)
+        self.Controls.Add(lbl_foc)
         
-        # Axis Inversion Options (Row 4)
+        self.txt_focal = TextBox()
+        self.txt_focal.Text = cfg.get("focal_length", "1000.0")
+        self.txt_focal.Location = Point(115, 359)
+        self.txt_focal.Size = Size(65, 20)
+        self.txt_focal.BackColor = Color.FromArgb(44, 44, 46)
+        self.txt_focal.ForeColor = Color.White
+        self.txt_focal.TextChanged += lambda s, e: self.recalculate_default_step()
+        self.Controls.Add(self.txt_focal)
+
+        # Axis Inversion Options (Row 5 - shifted down from 362 to 398)
         self.chk_inv_axis0 = CheckBox()
         self.chk_inv_axis0.Text = "Inverti Asse 0 (Az/RA)"
-        self.chk_inv_axis0.Location = Point(10, 362)
+        self.chk_inv_axis0.Location = Point(10, 398)
         self.chk_inv_axis0.Size = Size(230, 20)
         self.chk_inv_axis0.ForeColor = Color.LightGray
         self.chk_inv_axis0.Font = Font("Segoe UI", 9)
@@ -496,26 +563,26 @@ class SharpISSFollowerForm(Form):
         
         self.chk_inv_axis1 = CheckBox()
         self.chk_inv_axis1.Text = "Inverti Asse 1 (Alt/Dec)"
-        self.chk_inv_axis1.Location = Point(250, 362)
+        self.chk_inv_axis1.Location = Point(250, 398)
         self.chk_inv_axis1.Size = Size(230, 20)
         self.chk_inv_axis1.ForeColor = Color.LightGray
         self.chk_inv_axis1.Font = Font("Segoe UI", 9)
         self.chk_inv_axis1.Checked = cfg["inv_axis1"]
         self.Controls.Add(self.chk_inv_axis1)
         
-        # Slew & Calibrate (shifted down to accommodate axis inversion checkboxes)
+        # Slew & Calibrate (shifted down to accommodate new settings)
         lbl_slew = Label()
         lbl_slew.Text = "POSIZIONAMENTO & CALIBRAZIONE"
-        lbl_slew.Location = Point(10, 385)
+        lbl_slew.Location = Point(10, 425)
         lbl_slew.Size = Size(380, 20)
         lbl_slew.Font = Font("Segoe UI", 9, FontStyle.Bold)
         lbl_slew.ForeColor = Color.FromArgb(10, 132, 255)
         self.Controls.Add(lbl_slew)
         
-        # Row 1: GOTO Buttons
+        # Row 1: GOTO Buttons (shifted from 410 to 450)
         self.btn_goto_start = Button()
         self.btn_goto_start.Text = "GOTO Inizio"
-        self.btn_goto_start.Location = Point(10, 410)
+        self.btn_goto_start.Location = Point(10, 450)
         self.btn_goto_start.Size = Size(124, 28)
         self.btn_goto_start.BackColor = Color.FromArgb(58, 58, 60)
         self.btn_goto_start.ForeColor = Color.White
@@ -525,7 +592,7 @@ class SharpISSFollowerForm(Form):
         
         self.btn_goto_inter = Button()
         self.btn_goto_inter.Text = "GOTO Culmine"
-        self.btn_goto_inter.Location = Point(140, 410)
+        self.btn_goto_inter.Location = Point(140, 450)
         self.btn_goto_inter.Size = Size(124, 28)
         self.btn_goto_inter.BackColor = Color.FromArgb(58, 58, 60)
         self.btn_goto_inter.ForeColor = Color.White
@@ -535,7 +602,7 @@ class SharpISSFollowerForm(Form):
         
         self.btn_goto_end = Button()
         self.btn_goto_end.Text = "GOTO Fine"
-        self.btn_goto_end.Location = Point(270, 410)
+        self.btn_goto_end.Location = Point(270, 450)
         self.btn_goto_end.Size = Size(124, 28)
         self.btn_goto_end.BackColor = Color.FromArgb(58, 58, 60)
         self.btn_goto_end.ForeColor = Color.White
@@ -543,10 +610,10 @@ class SharpISSFollowerForm(Form):
         self.btn_goto_end.Click += lambda s, e: Threading.ThreadPool.QueueUserWorkItem(lambda state: self.run_manual_goto("end", self.coords_end))
         self.Controls.Add(self.btn_goto_end)
         
-        # Row 2: Plate Solve & Sync Button and Test Directions Button
+        # Row 2: Plate Solve & Sync Button and Test Directions Button (shifted from 445 to 485)
         self.btn_solve_sync = Button()
         self.btn_solve_sync.Text = "Plate Solve & Sync"
-        self.btn_solve_sync.Location = Point(10, 445)
+        self.btn_solve_sync.Location = Point(10, 485)
         self.btn_solve_sync.Size = Size(244, 28)
         self.btn_solve_sync.BackColor = Color.FromArgb(0, 122, 255)
         self.btn_solve_sync.ForeColor = Color.White
@@ -556,7 +623,7 @@ class SharpISSFollowerForm(Form):
         
         self.btn_test_dir = Button()
         self.btn_test_dir.Text = "Rileva Direzioni"
-        self.btn_test_dir.Location = Point(260, 445)
+        self.btn_test_dir.Location = Point(260, 485)
         self.btn_test_dir.Size = Size(134, 28)
         self.btn_test_dir.BackColor = Color.FromArgb(58, 58, 60)
         self.btn_test_dir.ForeColor = Color.White
@@ -564,10 +631,10 @@ class SharpISSFollowerForm(Form):
         self.btn_test_dir.Click += lambda s, e: Threading.ThreadPool.QueueUserWorkItem(lambda state: self.run_auto_direction_calibration())
         self.Controls.Add(self.btn_test_dir)
         
-        # Row 3: Set Correction Buttons
+        # Row 3: Set Correction Buttons (shifted from 480 to 520)
         self.btn_set_start = Button()
         self.btn_set_start.Text = "Set Corr. Iniz."
-        self.btn_set_start.Location = Point(10, 480)
+        self.btn_set_start.Location = Point(10, 520)
         self.btn_set_start.Size = Size(124, 28)
         self.btn_set_start.BackColor = Color.FromArgb(58, 58, 60)
         self.btn_set_start.ForeColor = Color.White
@@ -577,7 +644,7 @@ class SharpISSFollowerForm(Form):
         
         self.btn_set_inter = Button()
         self.btn_set_inter.Text = "Set Corr. Culm."
-        self.btn_set_inter.Location = Point(140, 480)
+        self.btn_set_inter.Location = Point(140, 520)
         self.btn_set_inter.Size = Size(124, 28)
         self.btn_set_inter.BackColor = Color.FromArgb(58, 58, 60)
         self.btn_set_inter.ForeColor = Color.White
@@ -587,7 +654,7 @@ class SharpISSFollowerForm(Form):
         
         self.btn_set_end = Button()
         self.btn_set_end.Text = "Set Corr. Fine"
-        self.btn_set_end.Location = Point(270, 480)
+        self.btn_set_end.Location = Point(270, 520)
         self.btn_set_end.Size = Size(124, 28)
         self.btn_set_end.BackColor = Color.FromArgb(58, 58, 60)
         self.btn_set_end.ForeColor = Color.White
@@ -595,10 +662,10 @@ class SharpISSFollowerForm(Form):
         self.btn_set_end.Click += lambda s, e: Threading.ThreadPool.QueueUserWorkItem(lambda state: self.run_set_correction("end"))
         self.Controls.Add(self.btn_set_end)
         
-        # Control Buttons
+        # Control Buttons (shifted from 530 to 560)
         self.btn_arm = Button()
         self.btn_arm.Text = "ARMA"
-        self.btn_arm.Location = Point(10, 530)
+        self.btn_arm.Location = Point(10, 560)
         self.btn_arm.Size = Size(150, 36)
         self.btn_arm.BackColor = Color.FromArgb(48, 209, 88)
         self.btn_arm.ForeColor = Color.White
@@ -615,7 +682,7 @@ class SharpISSFollowerForm(Form):
         
         self.btn_sim = Button()
         self.btn_sim.Text = "SIMULA"
-        self.btn_sim.Location = Point(170, 530)
+        self.btn_sim.Location = Point(170, 560)
         self.btn_sim.Size = Size(150, 36)
         self.btn_sim.BackColor = Color.FromArgb(10, 132, 255)
         self.btn_sim.ForeColor = Color.White
@@ -632,7 +699,7 @@ class SharpISSFollowerForm(Form):
         
         self.btn_abort = Button()
         self.btn_abort.Text = "ABORT"
-        self.btn_abort.Location = Point(330, 530)
+        self.btn_abort.Location = Point(330, 560)
         self.btn_abort.Size = Size(150, 36)
         self.btn_abort.BackColor = Color.FromArgb(255, 69, 58)
         self.btn_abort.ForeColor = Color.White
@@ -646,6 +713,107 @@ class SharpISSFollowerForm(Form):
                 print("[ERRORE] on_abort: " + str(ex))
         self.btn_abort.Click += _on_abort_click
         self.Controls.Add(self.btn_abort)
+
+        # Manual Offset D-pad (Row under Arm/Sim/Abort, centered at y=610 with 3x3 layout)
+        # Row 1, Col 1: Step Correction Speed input
+        lbl_sc = Label()
+        lbl_sc.Text = "Step (°):"
+        lbl_sc.Location = Point(55, 613)
+        lbl_sc.Size = Size(55, 20)
+        lbl_sc.ForeColor = Color.LightGray
+        self.Controls.Add(lbl_sc)
+        
+        self.txt_step_corr = TextBox()
+        self.txt_step_corr.Text = cfg.get("step_corr", "0.05")
+        self.txt_step_corr.Location = Point(112, 610)
+        self.txt_step_corr.Size = Size(55, 20)
+        self.txt_step_corr.BackColor = Color.FromArgb(44, 44, 46)
+        self.txt_step_corr.ForeColor = Color.White
+        self.Controls.Add(self.txt_step_corr)
+
+        # Row 1, Col 2: Up (▲ Alt/Dec +)
+        self.btn_off_ax1_pls = Button()
+        self.btn_off_ax1_pls.Text = "▲ Alt/Dec +"
+        self.btn_off_ax1_pls.Location = Point(185, 610)
+        self.btn_off_ax1_pls.Size = Size(112, 36)
+        self.btn_off_ax1_pls.BackColor = Color.FromArgb(58, 58, 60)
+        self.btn_off_ax1_pls.ForeColor = Color.White
+        self.btn_off_ax1_pls.Font = Font("Segoe UI", 9, FontStyle.Bold)
+        self.btn_off_ax1_pls.FlatStyle = 0
+        def _offset_axis1_plus(s, e):
+            try:
+                val = float(self.txt_step_corr.Text)
+                self.manual_offset_axis1 += val
+                self.track_integral_0 = 0.0
+                self.track_integral_1 = 0.0
+                self.log("Offset manual: Asse 1 (Alt/Dec) = %.4f°" % self.manual_offset_axis1)
+            except Exception:
+                pass
+        self.btn_off_ax1_pls.Click += _offset_axis1_plus
+        self.Controls.Add(self.btn_off_ax1_pls)
+
+        # Row 2, Col 1: Left (◀ Az/RA -)
+        self.btn_off_ax0_min = Button()
+        self.btn_off_ax0_min.Text = "◀ Az/RA -"
+        self.btn_off_ax0_min.Location = Point(55, 650)
+        self.btn_off_ax0_min.Size = Size(112, 36)
+        self.btn_off_ax0_min.BackColor = Color.FromArgb(58, 58, 60)
+        self.btn_off_ax0_min.ForeColor = Color.White
+        self.btn_off_ax0_min.Font = Font("Segoe UI", 9, FontStyle.Bold)
+        self.btn_off_ax0_min.FlatStyle = 0
+        def _offset_axis0_minus(s, e):
+            try:
+                val = float(self.txt_step_corr.Text)
+                self.manual_offset_axis0 -= val
+                self.track_integral_0 = 0.0
+                self.track_integral_1 = 0.0
+                self.log("Offset manual: Asse 0 (Az/RA) = %.4f°" % self.manual_offset_axis0)
+            except Exception:
+                pass
+        self.btn_off_ax0_min.Click += _offset_axis0_minus
+        self.Controls.Add(self.btn_off_ax0_min)
+
+        # Row 2, Col 3: Right (▶ Az/RA +)
+        self.btn_off_ax0_pls = Button()
+        self.btn_off_ax0_pls.Text = "▶ Az/RA +"
+        self.btn_off_ax0_pls.Location = Point(315, 650)
+        self.btn_off_ax0_pls.Size = Size(112, 36)
+        self.btn_off_ax0_pls.BackColor = Color.FromArgb(58, 58, 60)
+        self.btn_off_ax0_pls.ForeColor = Color.White
+        self.btn_off_ax0_pls.Font = Font("Segoe UI", 9, FontStyle.Bold)
+        self.btn_off_ax0_pls.FlatStyle = 0
+        def _offset_axis0_plus(s, e):
+            try:
+                val = float(self.txt_step_corr.Text)
+                self.manual_offset_axis0 += val
+                self.track_integral_0 = 0.0
+                self.track_integral_1 = 0.0
+                self.log("Offset manual: Asse 0 (Az/RA) = %.4f°" % self.manual_offset_axis0)
+            except Exception:
+                pass
+        self.btn_off_ax0_pls.Click += _offset_axis0_plus
+        self.Controls.Add(self.btn_off_ax0_pls)
+
+        # Row 3, Col 2: Down (▼ Alt/Dec -)
+        self.btn_off_ax1_min = Button()
+        self.btn_off_ax1_min.Text = "▼ Alt/Dec -"
+        self.btn_off_ax1_min.Location = Point(185, 690)
+        self.btn_off_ax1_min.Size = Size(112, 36)
+        self.btn_off_ax1_min.BackColor = Color.FromArgb(58, 58, 60)
+        self.btn_off_ax1_min.ForeColor = Color.White
+        self.btn_off_ax1_min.Font = Font("Segoe UI", 9, FontStyle.Bold)
+        self.btn_off_ax1_min.FlatStyle = 0
+        def _offset_axis1_minus(s, e):
+            try:
+                val = float(self.txt_step_corr.Text)
+                self.manual_offset_axis1 -= val
+                self.track_integral_0 = 0.0
+                self.track_integral_1 = 0.0
+                self.log("Offset manual: Asse 1 (Alt/Dec) = %.4f°" % self.manual_offset_axis1)
+            except Exception:
+                pass
+        self.btn_off_ax1_min.Click += _offset_axis1_minus
+        self.Controls.Add(self.btn_off_ax1_min)
         
         # === COLONNA 2: DESTRA (STATO, TELEMETRIA & LOG) ===
         # Target Info Panel (resized widths to 590 to fit the sky map on the right without overlapping)
@@ -1075,6 +1243,18 @@ class SharpISSFollowerForm(Form):
             return
             
         mount = SharpCap.Mounts.SelectedMount
+        if mount is not None:
+            try:
+                    cam = SharpCap.SelectedCamera
+                    try:
+                        self.log("DEBUG CAM SENSOR VALUE: PixelSize=%s, ImageSize=%s" % (str(cam.PixelSize), str(cam.GetImageSize())))
+                    except Exception as val_ex:
+                        self.log("DEBUG CAM SENSOR VALUE err: %s" % str(val_ex))
+                    # Also log TelescopeFocalLength if it exists
+                    if hasattr(SharpCap, "TelescopeFocalLength"):
+                        self.log("DEBUG FOCAL LENGTH: %s" % str(SharpCap.TelescopeFocalLength))
+            except Exception as e:
+                self.log("DEBUG CAM ATTRS err: %s" % str(e))
         if mount is not None and mount.Connected:
             self.log("Rilevata montatura connessa in SharpCap: %s" % mount.Name)
             try:
@@ -1304,6 +1484,8 @@ class SharpISSFollowerForm(Form):
                 self.flip_idx = data.get("MERIDIAN_FLIP_INDEX", None)
                 self.ha_1h_idx = data.get("HA_1H_INDEX", None)
                 self.ha_2h_idx = data.get("HA_2H_INDEX", None)
+                self.ha_minus1h_idx = data.get("HA_MINUS1H_INDEX", None)
+                self.ha_minus2h_idx = data.get("HA_MINUS2H_INDEX", None)
                 self.lbl_shift_info.Text = "Inizio: +0.0° | Fine: -0.0°"
                 # Debug logging of radar geometry
                 alt_c = trajectory[max_alt_idx][3]
@@ -1492,6 +1674,14 @@ class SharpISSFollowerForm(Form):
             self.set_state("Errore GOTO: " + str(e))
             self.log("Errore GOTO %s: %s" % (name, str(e)))
         finally:
+            try:
+                if mount is not None and mount.Connected and ascom is not None:
+                    self.cached_mount_ra = ascom.RightAscension
+                    self.cached_mount_dec = ascom.Declination
+                    self.cached_mount_alt = ascom.Altitude
+                    self.cached_mount_az = ascom.Azimuth
+            except Exception:
+                pass
             self.tracking_active = False
 
     def run_manual_solve_sync(self):
@@ -1814,6 +2004,10 @@ class SharpISSFollowerForm(Form):
             MessageBox.Show("Inseguimento già in corso. Premi ABORT per fermarlo.", "Attenzione", MessageBoxButtons.OK, MessageBoxIcon.Warning)
             return
 
+        # Reset manual offsets for the new tracking run
+        self.manual_offset_axis0 = 0.0
+        self.manual_offset_axis1 = 0.0
+
         # Check current time
         t_now = time.time()
         t_intercept = self.trajectory_data["INTERCEPT_TIME"]
@@ -1860,6 +2054,10 @@ class SharpISSFollowerForm(Form):
             MessageBox.Show("Inseguimento già in corso. Premi ABORT per fermarlo.", "Attenzione", MessageBoxButtons.OK, MessageBoxIcon.Warning)
             return
         
+        # Reset manual offsets for the new simulation run
+        self.manual_offset_axis0 = 0.0
+        self.manual_offset_axis1 = 0.0
+
         print("[DEBUG] Avvio thread SIMULA")
         self.abort_requested = False
         # Read all GUI values HERE in the GUI thread — worker thread cannot access WinForms controls
@@ -2001,6 +2199,10 @@ class SharpISSFollowerForm(Form):
             last_sent_rate_0 = None
             last_sent_rate_1 = None
             
+            # Integral terms for PI controller
+            self.track_integral_0 = 0.0
+            self.track_integral_1 = 0.0
+            
             while get_simulated_time() < t_end:
                 if self.abort_requested:
                     self.set_state("Inseguimento Interrotto")
@@ -2060,6 +2262,14 @@ class SharpISSFollowerForm(Form):
                     else:
                         target_ra = target_ra + d0 - self.calib_delta_ra_z
                         target_dec = target_dec + d1 - self.calib_delta_dec_z
+                        
+                # Apply manual offsets (Step Correction buttons)
+                if self.is_altaz:
+                    target_az = target_az + self.manual_offset_axis0
+                    target_alt = target_alt + self.manual_offset_axis1
+                else:
+                    target_ra = target_ra + (self.manual_offset_axis0 / 15.0)
+                    target_dec = target_dec + self.manual_offset_axis1
                 
                 # Feedforward speeds (deg/s)
                 ff_ra_rate = ra_rate0 + frac * (ra_rate1 - ra_rate0)
@@ -2071,14 +2281,49 @@ class SharpISSFollowerForm(Form):
                 try:
                     real_ra = ascom.RightAscension
                     real_dec = ascom.Declination
-                    real_alt = ascom.Altitude
-                    real_az = ascom.Azimuth
                     
+                    if self.is_altaz:
+                        # Calculate simulated Sidereal Time (LST) for the current simulated time
+                        lat = 45.0
+                        if self.trajectory_data is not None:
+                            lat = self.trajectory_data.get("OBSERVER_LAT", 45.0)
+                        
+                        # Real LST
+                        real_lst = ascom.SiderealTime
+                        # Adjusted LST for simulated time offset
+                        lst_sim = real_lst - (sim_offset * 1.002737909 / 3600.0)
+                        while lst_sim < 0.0: lst_sim += 24.0
+                        while lst_sim >= 24.0: lst_sim -= 24.0
+                        
+                        # Convert real_ra and real_dec to Alt/Az at simulated LST
+                        ra_rad = real_ra * 15.0 * math.pi / 180.0
+                        dec_rad = real_dec * math.pi / 180.0
+                        lat_rad = lat * math.pi / 180.0
+                        lst_rad = lst_sim * 15.0 * math.pi / 180.0
+                        
+                        ha_rad = lst_rad - ra_rad
+                        
+                        sin_alt = math.sin(dec_rad) * math.sin(lat_rad) + math.cos(dec_rad) * math.cos(lat_rad) * math.cos(ha_rad)
+                        sin_alt = max(-1.0, min(1.0, sin_alt))
+                        real_alt = math.asin(sin_alt) * 180.0 / math.pi
+                        
+                        y = -math.sin(ha_rad) * math.cos(dec_rad)
+                        x = math.sin(dec_rad) * math.cos(lat_rad) - math.cos(dec_rad) * math.sin(lat_rad) * math.cos(ha_rad)
+                        real_az = math.atan2(y, x) * 180.0 / math.pi
+                        if real_az < 0.0:
+                            real_az += 360.0
+                            
+                        self.cached_mount_alt = real_alt
+                        self.cached_mount_az = real_az
+                    else:
+                        real_alt = ascom.Altitude
+                        real_az = ascom.Azimuth
+                        self.cached_mount_alt = real_alt
+                        self.cached_mount_az = real_az
+                        
                     # Cache these values so the GUI thread can display them without querying ASCOM
                     self.cached_mount_ra = real_ra
                     self.cached_mount_dec = real_dec
-                    self.cached_mount_alt = real_alt
-                    self.cached_mount_az = real_az
                     
                     # Calculate position error
                     if self.is_altaz:
@@ -2104,11 +2349,27 @@ class SharpISSFollowerForm(Form):
                     ff_0 = ff_ra_rate
                     ff_1 = ff_dec_rate
                 
-                # Command rates (Proportional feedback + Feedforward)
-                # Keep correction clamped to +/- 1.0 deg/s to prevent jerks
+                # Command rates (PI feedback + Feedforward)
+                # Proportional terms
                 corr_0 = kp * err_axis_0
                 corr_1 = kp * err_axis_1
                 
+                # Integral terms
+                ki = 0.15 * kp  # Integral gain (15% of Proportional gain)
+                self.track_integral_0 += err_axis_0 * dt
+                self.track_integral_1 += err_axis_1 * dt
+                
+                # Anti-windup (clamp integral contribution to +/- 0.3 deg/s equivalent)
+                max_i_contrib = 0.3
+                if ki > 0.0:
+                    max_i = max_i_contrib / ki
+                    self.track_integral_0 = max(-max_i, min(max_i, self.track_integral_0))
+                    self.track_integral_1 = max(-max_i, min(max_i, self.track_integral_1))
+                    
+                corr_0 += ki * self.track_integral_0
+                corr_1 += ki * self.track_integral_1
+                
+                # Keep correction clamped to +/- 1.0 deg/s to prevent jerks
                 max_corr = 1.0
                 corr_0 = max(-max_corr, min(max_corr, corr_0))
                 corr_1 = max(-max_corr, min(max_corr, corr_1))
@@ -2116,15 +2377,16 @@ class SharpISSFollowerForm(Form):
                 cmd_rate_0 = ff_0 + corr_0
                 cmd_rate_1 = ff_1 + corr_1
                 
-                # Set axis rates with optional direction inversion (only update if change is >= 0.05 deg/s)
+                # Set axis rates with optional direction inversion
                 rate_0 = -cmd_rate_0 if inv_axis0 else cmd_rate_0
                 rate_1 = -cmd_rate_1 if inv_axis1 else cmd_rate_1
                 
-                if last_sent_rate_0 is None or abs(rate_0 - last_sent_rate_0) >= 0.1:
+                # Filter small variations (update only if change is >= 0.01 deg/s to avoid jerks)
+                if last_sent_rate_0 is None or abs(rate_0 - last_sent_rate_0) >= 0.01:
                     ascom.MoveAxis(to_axis(0), rate_0)
                     last_sent_rate_0 = rate_0
                     
-                if last_sent_rate_1 is None or abs(rate_1 - last_sent_rate_1) >= 0.1:
+                if last_sent_rate_1 is None or abs(rate_1 - last_sent_rate_1) >= 0.01:
                     ascom.MoveAxis(to_axis(1), rate_1)
                     last_sent_rate_1 = rate_1
                 
@@ -2154,6 +2416,8 @@ class SharpISSFollowerForm(Form):
             self.log("Errore critico nel loop di inseguimento:\n" + traceback.format_exc())
         finally:
             self.stop_hardware()
+            self.manual_offset_axis0 = 0.0
+            self.manual_offset_axis1 = 0.0
             self.tracking_active = False
 
     def get_trajectory_points(self, t_now, trajectory):
@@ -2411,6 +2675,16 @@ class SharpISSFollowerForm(Form):
         text_font_small = Font("Segoe UI", 7.0, FontStyle.Regular)
         margin_pen = Pen(Color.FromArgb(255, 149, 0), 1)
         
+        if hasattr(self, 'ha_minus2h_idx') and self.ha_minus2h_idx is not None:
+            ha_m2_x = 10 + int(float(self.ha_minus2h_idx) / (N - 1) * (width - 20))
+            g.DrawLine(margin_pen, ha_m2_x, bar_y, ha_m2_x, bar_y + bar_height)
+            g.DrawString("-2h", text_font_small, orange_brush, PointF(ha_m2_x - 6, bar_y - 12))
+
+        if hasattr(self, 'ha_minus1h_idx') and self.ha_minus1h_idx is not None:
+            ha_m1_x = 10 + int(float(self.ha_minus1h_idx) / (N - 1) * (width - 20))
+            g.DrawLine(margin_pen, ha_m1_x, bar_y, ha_m1_x, bar_y + bar_height)
+            g.DrawString("-1h", text_font_small, orange_brush, PointF(ha_m1_x - 6, bar_y - 12))
+
         if hasattr(self, 'ha_1h_idx') and self.ha_1h_idx is not None:
             ha1_x = 10 + int(float(self.ha_1h_idx) / (N - 1) * (width - 20))
             g.DrawLine(margin_pen, ha1_x, bar_y, ha1_x, bar_y + bar_height)
