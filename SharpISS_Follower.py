@@ -846,6 +846,36 @@ class SharpISSFollowerForm(Form):
         self.btn_off_ax1_min.Click += _offset_axis1_minus
         self.Controls.Add(self.btn_off_ax1_min)
         
+        # Row 1, Col 3: Swap/Invert Axis 1 (Alt/Dec) direction
+        self.btn_swap_axis1 = Button()
+        self.btn_swap_axis1.Text = "🔄 Inv Y"
+        self.btn_swap_axis1.Location = Point(315, 635)
+        self.btn_swap_axis1.Size = Size(112, 36)
+        self.btn_swap_axis1.BackColor = Color.FromArgb(58, 58, 60)
+        self.btn_swap_axis1.ForeColor = Color.White
+        self.btn_swap_axis1.Font = Font("Segoe UI", 9, FontStyle.Bold)
+        self.btn_swap_axis1.FlatStyle = 0
+        def _toggle_inv_axis1(s, e):
+            self.chk_inv_axis1.Checked = not self.chk_inv_axis1.Checked
+            self.log("Direzione Asse 1 (Alt/Dec) invertita: %s" % ("SI" if self.chk_inv_axis1.Checked else "NO"))
+        self.btn_swap_axis1.Click += _toggle_inv_axis1
+        self.Controls.Add(self.btn_swap_axis1)
+
+        # Row 3, Col 3: Swap/Invert Axis 0 (Az/RA) direction
+        self.btn_swap_axis0 = Button()
+        self.btn_swap_axis0.Text = "🔄 Inv X"
+        self.btn_swap_axis0.Location = Point(315, 715)
+        self.btn_swap_axis0.Size = Size(112, 36)
+        self.btn_swap_axis0.BackColor = Color.FromArgb(58, 58, 60)
+        self.btn_swap_axis0.ForeColor = Color.White
+        self.btn_swap_axis0.Font = Font("Segoe UI", 9, FontStyle.Bold)
+        self.btn_swap_axis0.FlatStyle = 0
+        def _toggle_inv_axis0(s, e):
+            self.chk_inv_axis0.Checked = not self.chk_inv_axis0.Checked
+            self.log("Direzione Asse 0 (Az/RA) invertita: %s" % ("SI" if self.chk_inv_axis0.Checked else "NO"))
+        self.btn_swap_axis0.Click += _toggle_inv_axis0
+        self.Controls.Add(self.btn_swap_axis0)
+        
         # === COLONNA 2: DESTRA (STATO, TELEMETRIA & LOG) ===
         # Target Info Panel (resized widths to 590 to fit the sky map on the right without overlapping)
         self.lbl_info_title = Label()
