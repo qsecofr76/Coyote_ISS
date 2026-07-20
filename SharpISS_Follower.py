@@ -160,6 +160,9 @@ class SharpISSFollowerForm(Form):
         self.active_thread = None
         
         # Pointing model / Calibration variables
+        self.has_calib_start = False
+        self.has_calib_inter = False
+        self.has_calib_end = False
         self.calib_delta_ra_x = 0.0
         self.calib_delta_dec_x = 0.0
         self.calib_delta_az_x = 0.0
@@ -247,6 +250,25 @@ class SharpISSFollowerForm(Form):
                 self.txt_step_corr.Text = "%.4f" % step_default
                 self.log("Ricalcolato step di correzione di default (1/3 FOV): %.4f°" % step_default)
         except Exception as e:
+            pass
+            
+    def update_calib_status_label(self):
+        try:
+            def update():
+                self.lbl_calib_status.Text = "Calibrazioni: Inizio: %s | Culmine: %s | Fine: %s" % (
+                    "✔️" if self.has_calib_start else "❌",
+                    "✔️" if self.has_calib_inter else "❌",
+                    "✔️" if self.has_calib_end else "❌"
+                )
+                if self.has_calib_start and self.has_calib_inter and self.has_calib_end:
+                    self.lbl_calib_status.ForeColor = Color.FromArgb(48, 209, 88)
+                else:
+                    self.lbl_calib_status.ForeColor = Color.LightGray
+            if self.InvokeRequired:
+                self.BeginInvoke(Action(update))
+            else:
+                update()
+        except Exception:
             pass
             
     def log(self, text):
@@ -714,18 +736,27 @@ class SharpISSFollowerForm(Form):
         self.btn_abort.Click += _on_abort_click
         self.Controls.Add(self.btn_abort)
 
-        # Manual Offset D-pad (Row under Arm/Sim/Abort, centered at y=610 with 3x3 layout)
+        # Calibration Status Label (shows which of the 3 points have valid plate solved corrections)
+        self.lbl_calib_status = Label()
+        self.lbl_calib_status.Text = "Calibrazioni: Inizio: ❌ | Culmine: ❌ | Fine: ❌"
+        self.lbl_calib_status.Location = Point(10, 605)
+        self.lbl_calib_status.Size = Size(380, 20)
+        self.lbl_calib_status.Font = Font("Segoe UI", 9, FontStyle.Regular)
+        self.lbl_calib_status.ForeColor = Color.LightGray
+        self.Controls.Add(self.lbl_calib_status)
+
+        # Manual Offset D-pad (Row under Arm/Sim/Abort, shifted down to y=635 with 3x3 layout)
         # Row 1, Col 1: Step Correction Speed input
         lbl_sc = Label()
         lbl_sc.Text = "Step (°):"
-        lbl_sc.Location = Point(55, 613)
+        lbl_sc.Location = Point(55, 638)
         lbl_sc.Size = Size(55, 20)
         lbl_sc.ForeColor = Color.LightGray
         self.Controls.Add(lbl_sc)
         
         self.txt_step_corr = TextBox()
         self.txt_step_corr.Text = cfg.get("step_corr", "0.05")
-        self.txt_step_corr.Location = Point(112, 610)
+        self.txt_step_corr.Location = Point(112, 635)
         self.txt_step_corr.Size = Size(55, 20)
         self.txt_step_corr.BackColor = Color.FromArgb(44, 44, 46)
         self.txt_step_corr.ForeColor = Color.White
@@ -734,7 +765,7 @@ class SharpISSFollowerForm(Form):
         # Row 1, Col 2: Up (▲ Alt/Dec +)
         self.btn_off_ax1_pls = Button()
         self.btn_off_ax1_pls.Text = "▲ Alt/Dec +"
-        self.btn_off_ax1_pls.Location = Point(185, 610)
+        self.btn_off_ax1_pls.Location = Point(185, 635)
         self.btn_off_ax1_pls.Size = Size(112, 36)
         self.btn_off_ax1_pls.BackColor = Color.FromArgb(58, 58, 60)
         self.btn_off_ax1_pls.ForeColor = Color.White
@@ -755,7 +786,7 @@ class SharpISSFollowerForm(Form):
         # Row 2, Col 1: Left (◀ Az/RA -)
         self.btn_off_ax0_min = Button()
         self.btn_off_ax0_min.Text = "◀ Az/RA -"
-        self.btn_off_ax0_min.Location = Point(55, 650)
+        self.btn_off_ax0_min.Location = Point(55, 675)
         self.btn_off_ax0_min.Size = Size(112, 36)
         self.btn_off_ax0_min.BackColor = Color.FromArgb(58, 58, 60)
         self.btn_off_ax0_min.ForeColor = Color.White
@@ -776,7 +807,7 @@ class SharpISSFollowerForm(Form):
         # Row 2, Col 3: Right (▶ Az/RA +)
         self.btn_off_ax0_pls = Button()
         self.btn_off_ax0_pls.Text = "▶ Az/RA +"
-        self.btn_off_ax0_pls.Location = Point(315, 650)
+        self.btn_off_ax0_pls.Location = Point(315, 675)
         self.btn_off_ax0_pls.Size = Size(112, 36)
         self.btn_off_ax0_pls.BackColor = Color.FromArgb(58, 58, 60)
         self.btn_off_ax0_pls.ForeColor = Color.White
@@ -797,7 +828,7 @@ class SharpISSFollowerForm(Form):
         # Row 3, Col 2: Down (▼ Alt/Dec -)
         self.btn_off_ax1_min = Button()
         self.btn_off_ax1_min.Text = "▼ Alt/Dec -"
-        self.btn_off_ax1_min.Location = Point(185, 690)
+        self.btn_off_ax1_min.Location = Point(185, 715)
         self.btn_off_ax1_min.Size = Size(112, 36)
         self.btn_off_ax1_min.BackColor = Color.FromArgb(58, 58, 60)
         self.btn_off_ax1_min.ForeColor = Color.White
@@ -1332,6 +1363,10 @@ class SharpISSFollowerForm(Form):
         self.coords_end = (trajectory[self.track_end_idx][1], trajectory[self.track_end_idx][2])
         
         self.lbl_shift_info.Text = "Inizio: +0.0° | Fine: -0.0°"
+        self.has_calib_start = False
+        self.has_calib_inter = False
+        self.has_calib_end = False
+        self.update_calib_status_label()
         self.pic_bar.Invalidate()
         if hasattr(self, 'pic_sky_map') and self.pic_sky_map is not None:
             self.pic_sky_map.Invalidate()
@@ -1486,6 +1521,10 @@ class SharpISSFollowerForm(Form):
                 self.ha_2h_idx = data.get("HA_2H_INDEX", None)
                 self.ha_minus1h_idx = data.get("HA_MINUS1H_INDEX", None)
                 self.ha_minus2h_idx = data.get("HA_MINUS2H_INDEX", None)
+                self.has_calib_start = False
+                self.has_calib_inter = False
+                self.has_calib_end = False
+                self.update_calib_status_label()
                 self.lbl_shift_info.Text = "Inizio: +0.0° | Fine: -0.0°"
                 # Debug logging of radar geometry
                 alt_c = trajectory[max_alt_idx][3]
@@ -1701,8 +1740,11 @@ class SharpISSFollowerForm(Form):
             star_exp = float(self._get_ui_value(self.txt_star_exp))
             star_gain = float(self._get_ui_value(self.txt_star_gain))
             self.configure_camera(star_exp, star_gain)
-            # Sleep 1.5s to let the camera apply and settle
-            Threading.Thread.Sleep(1500)
+            
+            # Dynamic sleep based on star exposure to let the camera apply settings and capture a frame
+            sleep_ms = int(max(2000.0, star_exp + 1000.0))
+            self.log("Attesa di %d ms per applicazione esposizione stellare..." % sleep_ms)
+            Threading.Thread.Sleep(sleep_ms)
             
             task = mount.SolveAndSync()
             
@@ -1842,8 +1884,11 @@ class SharpISSFollowerForm(Form):
             star_exp = float(self._get_ui_value(self.txt_star_exp))
             star_gain = float(self._get_ui_value(self.txt_star_gain))
             self.configure_camera(star_exp, star_gain)
-            # Sleep 1.5s to let the camera apply and settle
-            Threading.Thread.Sleep(1500)
+            
+            # Dynamic sleep based on star exposure to let the camera apply settings and capture a frame
+            sleep_ms = int(max(2000.0, star_exp + 1000.0))
+            self.log("Attesa di %d ms per applicazione esposizione stellare..." % sleep_ms)
+            Threading.Thread.Sleep(sleep_ms)
             
             # Read coordinates before solve
             ra_before = ascom.RightAscension
@@ -1969,18 +2014,22 @@ class SharpISSFollowerForm(Form):
                 self.calib_delta_dec_x = shift_dec
                 self.calib_delta_az_x = shift_az
                 self.calib_delta_alt_x = shift_alt
+                self.has_calib_start = True
             elif name == "intermediate":
                 self.calib_delta_ra_y = shift_ra
                 self.calib_delta_dec_y = shift_dec
                 self.calib_delta_az_y = shift_az
                 self.calib_delta_alt_y = shift_alt
+                self.has_calib_inter = True
             elif name == "end":
                 self.calib_delta_ra_z = shift_ra
                 self.calib_delta_dec_z = shift_dec
                 self.calib_delta_az_z = shift_az
                 self.calib_delta_alt_z = shift_alt
+                self.has_calib_end = True
             
             self.calib_active = True
+            self.update_calib_status_label()
             self.log("Correzione '%s' impostata: Delta RA=%.5fh, Delta Dec=%.4f°" % (name, shift_ra, shift_dec))
             self.set_state("Correzione %s Impostata" % name)
             
@@ -2233,29 +2282,48 @@ class SharpISSFollowerForm(Form):
                         self.log("Errore durante l'avvio della registrazione video: " + str(e))
                         capture_started = True  # don't retry repeatedly
                 
-                # Interpolate trajectory point
-                pt_pair = self.get_trajectory_points(t_now, trajectory)
-                if pt_pair is None:
-                    break
+                # Target coordinates & velocities (clamp to start coordinates during lead time wait)
+                if t_now < t_track_start:
+                    target_dec = trajectory[self.track_start_idx][2]
+                    target_alt = trajectory[self.track_start_idx][3]
+                    target_az = trajectory[self.track_start_idx][4]
+                    target_ra = trajectory[self.track_start_idx][1]
                     
-                p0, p1 = pt_pair
-                t0, ra0, dec0, alt0, az0, ra_rate0, dec_rate0, alt_rate0, az_rate0 = p0
-                t1, ra1, dec1, alt1, az1, ra_rate1, dec_rate1, alt_rate1, az_rate1 = p1
-                
-                # Interpolation fraction
-                frac = (t_now - t0) / (t1 - t0) if t1 > t0 else 0.0
-                
-                # Target coordinates & velocities
-                target_dec = dec0 + frac * (dec1 - dec0)
-                target_alt = alt0 + frac * (alt1 - alt0)
-                target_az = az0 + frac * angle_diff(az1, az0)
-                
-                target_ra_deg = ra0 * 15.0 + frac * angle_diff(ra1 * 15.0, ra0 * 15.0)
-                target_ra = target_ra_deg / 15.0
+                    ff_ra_rate = 0.0
+                    ff_dec_rate = 0.0
+                    ff_alt_rate = 0.0
+                    ff_az_rate = 0.0
+                else:
+                    # Interpolate trajectory point
+                    pt_pair = self.get_trajectory_points(t_now, trajectory)
+                    if pt_pair is None:
+                        break
+                        
+                    p0, p1 = pt_pair
+                    t0, ra0, dec0, alt0, az0, ra_rate0, dec_rate0, alt_rate0, az_rate0 = p0
+                    t1, ra1, dec1, alt1, az1, ra_rate1, dec_rate1, alt_rate1, az_rate1 = p1
+                    
+                    # Interpolation fraction
+                    frac = (t_now - t0) / (t1 - t0) if t1 > t0 else 0.0
+                    
+                    # Target coordinates & velocities
+                    target_dec = dec0 + frac * (dec1 - dec0)
+                    target_alt = alt0 + frac * (alt1 - alt0)
+                    target_az = az0 + frac * angle_diff(az1, az0)
+                    
+                    target_ra_deg = ra0 * 15.0 + frac * angle_diff(ra1 * 15.0, ra0 * 15.0)
+                    target_ra = target_ra_deg / 15.0
+                    
+                    # Feedforward speeds (deg/s)
+                    ff_ra_rate = ra_rate0 + frac * (ra_rate1 - ra_rate0)
+                    ff_dec_rate = dec_rate0 + frac * (dec_rate1 - dec_rate0)
+                    ff_alt_rate = alt_rate0 + frac * (alt_rate1 - alt_rate0)
+                    ff_az_rate = az_rate0 + frac * (az_rate1 - az_rate0)
                 
                 # Apply dynamic pointing calibration if active
                 if self.calib_active:
-                    d0, d1 = self.get_interpolated_correction(t_now)
+                    t_corr_query = max(t_track_start, t_now)
+                    d0, d1 = self.get_interpolated_correction(t_corr_query)
                     if self.is_altaz:
                         target_az = target_az + d0 - self.calib_delta_az_z
                         target_alt = target_alt + d1 - self.calib_delta_alt_z
@@ -2270,12 +2338,7 @@ class SharpISSFollowerForm(Form):
                 else:
                     target_ra = target_ra + (self.manual_offset_axis0 / 15.0)
                     target_dec = target_dec + self.manual_offset_axis1
-                
-                # Feedforward speeds (deg/s)
-                ff_ra_rate = ra_rate0 + frac * (ra_rate1 - ra_rate0)
-                ff_dec_rate = dec_rate0 + frac * (dec_rate1 - dec_rate0)
-                ff_alt_rate = alt_rate0 + frac * (alt_rate1 - alt_rate0)
-                ff_az_rate = az_rate0 + frac * (az_rate1 - az_rate0)
+
                 
                 # Read current mount coordinates and calculate errors (at 5 Hz loop frequency)
                 try:
