@@ -1,4 +1,4 @@
-# Coyote ISS
+# <img src="coyote_iss_icon.png" width="48" height="48" valign="middle"> Coyote ISS
 
 **WORK IN PROGRESS.**
 
