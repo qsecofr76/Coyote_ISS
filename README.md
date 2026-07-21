@@ -2,7 +2,7 @@
 
 **WORK IN PROGRESS.**
 
-Perchè questo software ha come mascotte Willy il Coyote? Perchè il Coyote non cattura mai Bip Bip e si schianta malamente pressochè sempre. Questo dovrebbe essere di monito verso chi vuole usare questo software: se non cattura nulla oppure il telescopio si schianta sul treppiede o da qualche parte sono cazzi vostri: io vi ho avvisato.
+**Perchè questo software ha come mascotte Willy il Coyote? Perchè il Coyote non cattura mai Bip Bip e si schianta malamente pressochè sempre. Questo dovrebbe essere di monito verso chi vuole usare questo software**: se non cattura nulla oppure il telescopio si schianta sul treppiede o da qualche parte sono cazzi vostri: io vi ho avvisato.
 
 Comunque se siete anche voi dei temerari Coyote e state attenti al movimento regolando magari le frizioni del telescopio in modo da non far danni: questo è il software.
 
