@@ -18,3 +18,6 @@ __pycache__/
 *.pyd
 # Ephemeris database
 de421.bsp
+
+# Test scripts
+TestCapture.py
