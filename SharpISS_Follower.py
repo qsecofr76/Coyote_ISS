@@ -2204,14 +2204,18 @@ class SharpISSFollowerForm(Form):
                     min_allowed = None
                     max_allowed = None
                     
+                    rates_str = []
                     for r in axis_rates:
                         r_min = float(r.Minimum)
                         r_max = float(r.Maximum)
+                        rates_str.append("[%.5f, %.5f]" % (r_min, r_max))
                         if min_allowed is None or r_min < min_allowed:
                             min_allowed = r_min
                         if max_allowed is None or r_max > max_allowed:
                             max_allowed = r_max
                             
+                    self.log("[DEBUG] Asse %d AxisRates: %s" % (axis_idx, ", ".join(rates_str)))
+                    
                     if min_allowed is not None and abs_rate < min_allowed:
                         if abs_rate < min_allowed * 0.5:
                             return 0.0
@@ -2219,18 +2223,20 @@ class SharpISSFollowerForm(Form):
                             return math.copysign(min_allowed, rate)
                             
                     if max_allowed is not None and abs_rate > max_allowed:
+                        self.log("[DEBUG] Rate %.5f supera max_allowed %.5f per Asse %d. Clamping." % (rate, max_allowed, axis_idx))
                         return math.copysign(max_allowed, rate)
-        except Exception:
-            pass
+        except Exception as e:
+            self.log("[DEBUG] Fallito recupero AxisRates Asse %d: %s" % (axis_idx, str(e)))
             
-        # Hardcoded fallback limits: if it fails, clamp to +/- 4.0 deg/s to prevent driver crashes
+        # Hardcoded fallback limits: clamp to +/- 1.0 deg/s to prevent driver crashes
         abs_rate = abs(rate)
         if abs_rate < 0.002: # Deadband for very small corrections
             return 0.0
-        if abs_rate > 4.0:
-            return math.copysign(4.0, rate)
+        if abs_rate > 1.0:
+            return math.copysign(1.0, rate)
             
         return rate
+
 
     # --- TRACKING LOOP WORKER ---
     def tracking_worker(self, is_simulation, is_altaz, lead_time, kp, star_gain, iss_gain, iss_exp, inv_axis0, inv_axis1):
