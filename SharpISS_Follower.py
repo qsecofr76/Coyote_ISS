@@ -2190,6 +2190,48 @@ class SharpISSFollowerForm(Form):
                 self.log("Errore arresto registrazione: " + str(e))
         Threading.ThreadPool.QueueUserWorkItem(lambda state: _stop_capture())
 
+    def clamp_axis_rate(self, axis_idx, rate):
+        if abs(rate) < 1e-5:
+            return 0.0
+            
+        try:
+            if SharpCap is not None and SharpCap.Mounts.SelectedMount is not None:
+                ascom = SharpCap.Mounts.SelectedMount.AscomMount
+                axis_rates = ascom.AxisRates(to_axis(axis_idx))
+                
+                if axis_rates is not None and len(axis_rates) > 0:
+                    abs_rate = abs(rate)
+                    min_allowed = None
+                    max_allowed = None
+                    
+                    for r in axis_rates:
+                        r_min = float(r.Minimum)
+                        r_max = float(r.Maximum)
+                        if min_allowed is None or r_min < min_allowed:
+                            min_allowed = r_min
+                        if max_allowed is None or r_max > max_allowed:
+                            max_allowed = r_max
+                            
+                    if min_allowed is not None and abs_rate < min_allowed:
+                        if abs_rate < min_allowed * 0.5:
+                            return 0.0
+                        else:
+                            return math.copysign(min_allowed, rate)
+                            
+                    if max_allowed is not None and abs_rate > max_allowed:
+                        return math.copysign(max_allowed, rate)
+        except Exception:
+            pass
+            
+        # Hardcoded fallback limits: if it fails, clamp to +/- 4.0 deg/s to prevent driver crashes
+        abs_rate = abs(rate)
+        if abs_rate < 0.002: # Deadband for very small corrections
+            return 0.0
+        if abs_rate > 4.0:
+            return math.copysign(4.0, rate)
+            
+        return rate
+
     # --- TRACKING LOOP WORKER ---
     def tracking_worker(self, is_simulation, is_altaz, lead_time, kp, star_gain, iss_gain, iss_exp, inv_axis0, inv_axis1):
         print("[DEBUG] tracking_worker avviato, is_simulation=%s" % is_simulation)
@@ -2471,17 +2513,37 @@ class SharpISSFollowerForm(Form):
                 cmd_rate_1 = ff_1 + corr_1
                 
                 # Set axis rates with optional direction inversion
-                rate_0 = -cmd_rate_0 if inv_axis0 else cmd_rate_0
-                rate_1 = -cmd_rate_1 if inv_axis1 else cmd_rate_1
+                rate_raw_0 = -cmd_rate_0 if inv_axis0 else cmd_rate_0
+                rate_raw_1 = -cmd_rate_1 if inv_axis1 else cmd_rate_1
                 
-                # Filter small variations (update only if change is >= 0.01 deg/s to avoid jerks)
+                # Apply dynamic ASCOM rate limits and deadband clamping
+                rate_0 = self.clamp_axis_rate(0, rate_raw_0)
+                rate_1 = self.clamp_axis_rate(1, rate_raw_1)
+                
+                # Filter small variations and command axes safely with try-except to avoid thread crashes
                 if last_sent_rate_0 is None or abs(rate_0 - last_sent_rate_0) >= 0.01:
-                    ascom.MoveAxis(to_axis(0), rate_0)
-                    last_sent_rate_0 = rate_0
-                    
+                    try:
+                        ascom.MoveAxis(to_axis(0), rate_0)
+                        last_sent_rate_0 = rate_0
+                    except Exception as ex:
+                        self.log("Errore ASCOM MoveAxis Asse 0 (rate=%.5f): %s" % (rate_0, str(ex)))
+                        try:
+                            ascom.MoveAxis(to_axis(0), 0.0)
+                        except:
+                            pass
+                        last_sent_rate_0 = 0.0
+                        
                 if last_sent_rate_1 is None or abs(rate_1 - last_sent_rate_1) >= 0.01:
-                    ascom.MoveAxis(to_axis(1), rate_1)
-                    last_sent_rate_1 = rate_1
+                    try:
+                        ascom.MoveAxis(to_axis(1), rate_1)
+                        last_sent_rate_1 = rate_1
+                    except Exception as ex:
+                        self.log("Errore ASCOM MoveAxis Asse 1 (rate=%.5f): %s" % (rate_1, str(ex)))
+                        try:
+                            ascom.MoveAxis(to_axis(1), 0.0)
+                        except:
+                            pass
+                        last_sent_rate_1 = 0.0
                 
                 # Update UI
                 countdown_str = "Tempo trascorso: " + self.format_duration(t_now - t_start)
